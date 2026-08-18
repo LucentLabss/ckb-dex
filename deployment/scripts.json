@@ -1,0 +1,21 @@
+{
+  "devnet": {
+    "dex-order-lock": {
+      "codeHash": "0x2ac318d6f1593c62bda4575a4151f9026a4451005360149f746e28524ca3d980",
+      "hashType": "data2",
+      "cellDeps": [
+        {
+          "cellDep": {
+            "outPoint": {
+              "txHash": "0xc96df5ac0ca92fc0e29c1cdc6b5dcdd90a474f5aa9db46928085319534417490",
+              "index": 0
+            },
+            "depType": "code"
+          }
+        }
+      ]
+    }
+  },
+  "testnet": {},
+  "mainnet": {}
+}
