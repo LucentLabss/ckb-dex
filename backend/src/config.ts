@@ -1,5 +1,5 @@
 import AppError from "./services/error.js";
-import { Config, AppConfig, NODE_ENV } from "./types";
+import { Config, AppConfig, NODE_ENV, Hex, HashType } from "./types";
 import * as dotenv from "dotenv";
 import { extractNestedValues } from "./utils";
 
@@ -19,9 +19,9 @@ export default class AppConfiguration implements AppConfig {
         this.config = {
             mongodbUrl: envs.MONGO_DB_URL ?? "",
             dexOrderLockScript: {
-                codeHash: envs.CKD_DEX_SCRIPT_CODE_HASH ?? "",
-                hashType: envs.CKB_DEX_SCRIPT_HASH_TYPE ?? "",
-                args: envs.CKB_DEX_SCRIPT_ARGS ?? ""
+                codeHash: envs.CKD_DEX_SCRIPT_CODE_HASH as Hex ?? "",
+                hashType: envs.CKB_DEX_SCRIPT_HASH_TYPE as HashType ?? "",
+                args: envs.CKB_DEX_SCRIPT_ARGS as Hex ?? ""
             },
             enviroment: envs.NODE_ENV as NODE_ENV ?? "development",
             port: Number(envs.PORT) ?? 8080,

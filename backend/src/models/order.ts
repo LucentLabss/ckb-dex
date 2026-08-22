@@ -1,74 +1,58 @@
 import mongoose, { Schema } from "mongoose";
-import { type Script as LockScript } from "../types";
 
-export const Script = new Schema({
-    codeHash: String,
-    hashType: String,
-    /**@property args is the molecule serialized owner's lockscript which can be deserialized */
-    args: String /** The full "0x2c0000..." blob */
-})
+const ScriptSchema = new Schema({
+  codeHash: { type: String, required: true },
+  hashType: { type: String, enum: ["data", "type", "data1", "data2"], required: true },
+  args:     { type: String, required: true },
+}, { _id: false });
 
-export interface OrderDocument {
-    _id: number;
-    outPoint: { txHash: string; index: number };
-    lockScript: LockScript;
-    /* Parsed for fast querying */
-    ownerAddress: string;
-    orderType: "LIMIT" | "MARKET";
-    price: string;
-    amount: string;
-    tokenPair: string;
-    direction: "BUY" | "SELL"
-    status: "LIVE" | "FILLED" | "CANCELED";
-}
+export const OrderSchema = new Schema({
+  _id: { type: String },                      // `${txHash}:${index}`
 
-export const OutPointType = new Schema({
-    txHash: String,
-    index: Number
-});
+  outPoint: {
+    txHash: { type: String, required: true },
+    index:  { type: Number, required: true },
+  },
 
+  // CANONICAL: byte-exact, straight from the indexer, never re-derived
+  lockScript: { type: ScriptSchema, required: true },   // the DEX lock
+  typeScript: { type: ScriptSchema, required: true },   // the xUDT script
+  cellData:   { type: String, required: true },
+  capacity:   { type: String, required: true },         // shannons
 
-export const OrderSchema = new Schema<OrderDocument>({
-    _id: Number,
-    outPoint: {
-        type: OutPointType,
-        required: true
-    },
-    lockScript: {
-        type: Script,
-        required: true
-    },
-    ownerAddress: {
-        type: String,
-        required: true
-    },
-    orderType: {
-        type: String,
-        enum: ["LIMIT", "MARKET"]
-    },
-    status: {
-        type: String,
-        enum: ["LIVE", "FILLED", "CANCELD"],
-        required: true
-    },
-    price: {
-        type: String,
-        required: true
-    },
-    amount: {
-        type: String,
-        required: true
-    },
-    tokenPair: {
-        type: String,
-        required: true
-    },
-    direction: {
-        type: String,
-        enum: ["BUY", "SELL"]
-    },
-})
+  // PROJECTION: decoded from lockScript.args, for querying and building
+  ownerLock:     { type: ScriptSchema, required: true },  // ← used for payouts
+  ownerLockHash: { type: String, required: true, index: true },
+  ownerAddress:  { type: String, required: true },        // display only
 
+  direction:      { type: String, enum: ["BID", "ASK"], required: true },
+  pricePerToken:  { type: Schema.Types.Decimal128, required: true }, // shannons/token
+  remainingAmount:{ type: String, required: true },       // u128 as string
+  receivedAmount: { type: String, default: "0" },         // bids only
 
-const OrderModel = mongoose.model("Order", OrderSchema);
-export default OrderModel;
+  tokenPair:   { type: String, required: true, index: true },
+  udtTypeHash: { type: String, required: true },
+
+  // chain position: the real time axis for price-time priority
+  blockNumber: { type: Number, required: true },
+  txIndex:     { type: Number, required: true },
+
+  // bot coordination: yours alone, nothing on chain
+  status: {
+    type: String,
+    enum: ["LIVE", "RESERVED", "PENDING", "FILLED", "CANCELED"],
+    required: true,
+    default: "LIVE",
+  },
+  reservedUntil: { type: Date, default: null },
+  pendingTxHash: { type: String, default: null },
+}, { timestamps: true });
+
+// The matching query. Direction is in the key so each side scans only its own.
+OrderSchema.index({ tokenPair: 1, direction: 1, status: 1, pricePerToken: 1, blockNumber: 1, txIndex: 1 });
+// "my orders"
+OrderSchema.index({ ownerLockHash: 1, status: 1 });
+// reservation sweeper
+OrderSchema.index({ status: 1, reservedUntil: 1 });
+
+export default mongoose.model("Order", OrderSchema);
