@@ -1,0 +1,40 @@
+# CKB DEX Backend Status Report
+
+## Current Status
+
+The backend required for the CKB DEX proof of concept has been implemented and verified. It is ready for the bot developer to integrate against and for the UI to consume as a read-only order and trade data source.
+
+The system follows a non-custodial model: CKB remains the source of truth, users sign their own transactions, and the backend stores a MongoDB projection of confirmed chain activity for fast API access.
+
+## Delivered Functionality
+
+- Backend service startup, configuration validation, health checks, readiness checks, request IDs, error handling, and clean database shutdown.
+- MongoDB records for orders, confirmed trades, and bot-event audit history.
+- Authenticated bot-to-backend event ingestion with validation, duplicate protection, audit logging, and order lifecycle enforcement.
+- Support for confirmed orders, settlement submissions, confirmed trades, cancellations, and chain reorganization notifications.
+- REST APIs for markets, live order books, individual orders, maker order history, and confirmed trades.
+- WebSocket support for live market order-book updates, trade updates, and maker-specific order updates.
+- Technical handover documentation for the bot developer, including endpoint, authentication, payload, and retry requirements.
+- Concise file-purpose comments throughout the backend source code to improve maintainability.
+
+## Integration Readiness
+
+The bot can now integrate through the authenticated internal event endpoint. Its responsibilities are to observe and index CKB order cells, construct and monitor settlement transactions, and send normalized updates to the backend.
+
+The backend processes those events into queryable state for the UI. It handles retried events safely, distinguishes submitted settlements from confirmed fills, and records every ingestion decision for traceability.
+
+The current scope supports full xUDT sell orders only. Partial fills, buy orders, market orders, and multi-order atomic matching are outside the proof-of-concept contract scope.
+
+## Verification
+
+The latest verification completed successfully:
+
+- TypeScript compilation: passed with no errors.
+- Event-schema validation tests: 4 passed.
+- MongoDB-backed market API integration test: 1 passed.
+- Total failures: 0.
+
+The API integration test uses a real temporary MongoDB instance and confirms that the running backend returns projected market, order-book, and trade data correctly.
+
+
+
