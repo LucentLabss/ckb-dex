@@ -4,16 +4,19 @@ import mongoose, { Schema } from "mongoose";
 export interface TradeDocument {
   _id: string;
   settlementTxHash: string;
-  orderOutPoint: {
+  buyOrderOutPoint: {
     txHash: string;
     index: string;
   };
-  makerLockHash: string;
+  sellOrderOutPoint: {
+    txHash: string;
+    index: string;
+  };
   buyerLockHash: string;
+  sellerLockHash: string;
   xudtTypeHash: string;
   tokenAmount: string;
-  totalAskCapacity: string;
-  orderCapacity: string;
+  price: string;
   paidCapacity: string;
   blockNumber: string;
   blockHash: string;
@@ -35,13 +38,13 @@ export const TradeSchema = new Schema<TradeDocument>(
   {
     _id: { type: String, required: true, immutable: true },
     settlementTxHash: { type: String, required: true, immutable: true },
-    orderOutPoint: { type: OutPointSchema, required: true, immutable: true },
-    makerLockHash: { type: String, required: true, immutable: true },
+    buyOrderOutPoint: { type: OutPointSchema, required: true, immutable: true },
+    sellOrderOutPoint: { type: OutPointSchema, required: true, immutable: true },
     buyerLockHash: { type: String, required: true, immutable: true },
+    sellerLockHash: { type: String, required: true, immutable: true },
     xudtTypeHash: { type: String, required: true, immutable: true },
     tokenAmount: { type: String, required: true, immutable: true },
-    totalAskCapacity: { type: String, required: true, immutable: true },
-    orderCapacity: { type: String, required: true, immutable: true },
+    price: { type: String, required: true, immutable: true },
     paidCapacity: { type: String, required: true, immutable: true },
     blockNumber: { type: String, required: true, immutable: true },
     blockHash: { type: String, required: true, immutable: true },
@@ -52,9 +55,10 @@ export const TradeSchema = new Schema<TradeDocument>(
 );
 
 TradeSchema.index({ settlementTxHash: 1 }, { unique: true });
-TradeSchema.index({ "orderOutPoint.txHash": 1, "orderOutPoint.index": 1 });
+TradeSchema.index({ "buyOrderOutPoint.txHash": 1, "buyOrderOutPoint.index": 1 });
+TradeSchema.index({ "sellOrderOutPoint.txHash": 1, "sellOrderOutPoint.index": 1 });
 TradeSchema.index({ xudtTypeHash: 1, confirmedAtBlock: -1 });
-TradeSchema.index({ makerLockHash: 1, confirmedAtBlock: -1 });
+TradeSchema.index({ sellerLockHash: 1, confirmedAtBlock: -1 });
 
 const TradeModel = mongoose.model<TradeDocument>("Trade", TradeSchema);
 export default TradeModel;

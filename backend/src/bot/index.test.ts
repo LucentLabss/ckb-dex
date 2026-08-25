@@ -99,7 +99,7 @@ function fakePairOrder(
   return {
     label,
     direction,
-    udtTypeHash,
+    xudtTypeHash: udtTypeHash,
     remainingAmount: tokenAmount,
     pricePerToken: new mongoose.Types.Decimal128(price),
     blockNumber,

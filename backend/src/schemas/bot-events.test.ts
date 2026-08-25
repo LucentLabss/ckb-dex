@@ -22,22 +22,35 @@ test("accepts valid order-confirmed event fixture", () => {
       index: "0",
     },
     order: {
-      orderCellLockHash:
+      lockScript: {
+        codeHash:
         "0x4444444444444444444444444444444444444444444444444444444444444444",
-      dexLockArgs: "0xabcd",
-      typeScriptHash:
+        hashType: "type",
+        args: "0xabcd",
+      },
+      typeScript: {
+        codeHash:
         "0x5555555555555555555555555555555555555555555555555555555555555555",
+        hashType: "type",
+        args: "0x",
+      },
+      cellData: "0xe8030000000000000000000000000000",
+      capacity: "10000000000",
+      ownerLock: {
+        codeHash:
+          "0x7777777777777777777777777777777777777777777777777777777777777777",
+        hashType: "type",
+        args: "0x",
+      },
+      ownerLockHash:
+        "0x7777777777777777777777777777777777777777777777777777777777777777",
+      direction: "ASK",
+      pricePerToken: "3000000000",
       xudtTypeHash:
         "0x6666666666666666666666666666666666666666666666666666666666666666",
-      makerLockHash:
-        "0x7777777777777777777777777777777777777777777777777777777777777777",
-      makerAddress: "ckt1qexampleaddress",
       tokenAmount: "1000",
-      orderCapacity: "10000000000",
-      totalAskCapacity: "3000000000",
-      createdAtTxHash:
-        "0x8888888888888888888888888888888888888888888888888888888888888888",
-      createdAtBlock: "999",
+      blockNumber: "999",
+      txIndex: "0",
     },
   });
 
@@ -48,22 +61,25 @@ test("accepts valid trade-confirmed event fixture", () => {
   const parsed = botEventSchema.parse({
     ...baseEvent,
     eventType: "trade-confirmed",
-    outPoint: {
+    buyOrderOutPoint: {
       txHash: "0x3333333333333333333333333333333333333333333333333333333333333333",
       index: "0",
     },
+    sellOrderOutPoint: {
+      txHash: "0x9999999999999999999999999999999999999999999999999999999999999999",
+      index: "1",
+    },
     trade: {
       settlementTxHash:
-        "0x9999999999999999999999999999999999999999999999999999999999999999",
-      makerLockHash:
-        "0x7777777777777777777777777777777777777777777777777777777777777777",
-      buyerLockHash:
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      buyerLockHash:
+        "0x7777777777777777777777777777777777777777777777777777777777777777",
+      sellerLockHash:
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       xudtTypeHash:
         "0x6666666666666666666666666666666666666666666666666666666666666666",
       tokenAmount: "1000",
-      totalAskCapacity: "3000000000",
-      orderCapacity: "10000000000",
+      price: "3000000000",
       paidCapacity: "13000000000",
       confirmedAtBlock: "1000",
     },

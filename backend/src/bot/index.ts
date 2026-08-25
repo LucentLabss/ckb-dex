@@ -1,8 +1,11 @@
+// Indexes DEX order cells, matches compatible bid/ask pairs, and submits settlement transactions.
 import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
 import { Config, Hex, Script } from "../types";
+import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
+import { EventIngestionService } from "../services/event-ingestion.js";
 import { toBuffer, toHex } from "../utils/index.js";
 import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
 import systemScriptsJson from "../../../deployment/system-scripts.json" with { type: "json" };
@@ -134,6 +137,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly client: ccc.Client;
   private readonly dexCellDeps: ccc.CellDepLike[];
   private readonly xudtCellDeps: ccc.CellDepLike[];
+  private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
   private lastScannedBlock: bigint | undefined;
@@ -525,31 +529,32 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const ownerAddress = ccc.Address.fromScript(ownerLock, this.client).toString();
 
-    return Order.findOneAndUpdate(
-      { _id: id },
-      {
-        $setOnInsert: {
-          _id: id,
-          outPoint: { txHash: cell.outPoint.txHash, index: Number(cell.outPoint.index) },
-          lockScript: cell.cellOutput.lock,
-          typeScript: cell.cellOutput.type,
-          cellData: cell.outputData,
-          capacity: cell.cellOutput.capacity.toString(),
-          ownerLock,
-          ownerLockHash: decoded.makerLockHash,
-          ownerAddress,
-          direction: decoded.direction,
-          pricePerToken: decoded.pricePerToken.toString(),
-          remainingAmount: decoded.tokenAmount.toString(),
-          tokenPair: `${decoded.udtTypeHash}:CKB`,
-          udtTypeHash: decoded.udtTypeHash,
-          blockNumber: Number(creatingTx.blockNumber),
-          txIndex: Number(creatingTx.txIndex ?? 0n),
-          status: "LIVE",
-        },
+    await this.ingestionService.ingest({
+      schemaVersion: 1,
+      eventId: `order-confirmed:${id}:${creatingTx.blockNumber}`,
+      occurredAt: new Date().toISOString(),
+      transactionHash: cell.outPoint.txHash,
+      blockNumber: creatingTx.blockNumber.toString(),
+      eventType: "order-confirmed",
+      outPoint: { txHash: cell.outPoint.txHash, index: cell.outPoint.index.toString() },
+      order: {
+        lockScript: cell.cellOutput.lock,
+        typeScript: cell.cellOutput.type,
+        cellData: cell.outputData,
+        capacity: cell.cellOutput.capacity.toString(),
+        ownerLock,
+        ownerLockHash: decoded.makerLockHash,
+        ownerAddress,
+        direction: decoded.direction,
+        pricePerToken: decoded.pricePerToken.toString(),
+        tokenAmount: decoded.tokenAmount.toString(),
+        xudtTypeHash: decoded.udtTypeHash,
+        blockNumber: creatingTx.blockNumber.toString(),
+        txIndex: (creatingTx.txIndex ?? 0n).toString(),
       },
-      { upsert: true, new: true },
-    );
+    } as BotEvent);
+
+    return (await Order.findById(id)) ?? undefined;
   }
 
   /** Re-checks tracked LIVE/RESERVED orders for cancellations or fills made outside executeTrade. */

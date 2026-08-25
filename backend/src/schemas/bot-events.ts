@@ -7,6 +7,12 @@ const outPointSchema = z.object({
   index: z.string().min(1),
 });
 
+const scriptSchema = z.object({
+  codeHash: hashSchema,
+  hashType: z.enum(["data", "type", "data1", "data2"]),
+  args: z.string().regex(/^0x[0-9a-fA-F]*$/),
+});
+
 const botEventBaseSchema = z.object({
   schemaVersion: z.literal(1),
   eventId: z.string().min(1),
@@ -21,17 +27,19 @@ export const orderConfirmedEventSchema = botEventBaseSchema.extend({
   eventType: z.literal("order-confirmed"),
   outPoint: outPointSchema,
   order: z.object({
-    orderCellLockHash: hashSchema,
-    dexLockArgs: z.string().regex(/^0x[0-9a-fA-F]*$/),
-    typeScriptHash: hashSchema,
-    xudtTypeHash: hashSchema,
-    makerLockHash: hashSchema,
-    makerAddress: z.string().optional(),
+    lockScript: scriptSchema,
+    typeScript: scriptSchema.optional(),
+    cellData: z.string().regex(/^0x[0-9a-fA-F]*$/),
+    capacity: z.string().min(1),
+    ownerLock: scriptSchema,
+    ownerLockHash: hashSchema,
+    ownerAddress: z.string().optional(),
+    direction: z.enum(["ASK", "BID"]),
+    pricePerToken: z.string().min(1),
     tokenAmount: z.string().min(1),
-    orderCapacity: z.string().min(1),
-    totalAskCapacity: z.string().min(1),
-    createdAtTxHash: hashSchema,
-    createdAtBlock: z.string().min(1).optional(),
+    xudtTypeHash: hashSchema,
+    blockNumber: z.string().min(1),
+    txIndex: z.string().min(1),
   }),
 });
 
@@ -43,21 +51,21 @@ export const orderCancelledEventSchema = botEventBaseSchema.extend({
 
 export const settlementSubmittedEventSchema = botEventBaseSchema.extend({
   eventType: z.literal("settlement-submitted"),
-  outPoint: outPointSchema,
+  orderOutPoints: z.array(outPointSchema).length(2),
   settlementTxHash: hashSchema,
 });
 
 export const tradeConfirmedEventSchema = botEventBaseSchema.extend({
   eventType: z.literal("trade-confirmed"),
-  outPoint: outPointSchema,
+  buyOrderOutPoint: outPointSchema,
+  sellOrderOutPoint: outPointSchema,
   trade: z.object({
     settlementTxHash: hashSchema,
-    makerLockHash: hashSchema,
     buyerLockHash: hashSchema,
+    sellerLockHash: hashSchema,
     xudtTypeHash: hashSchema,
     tokenAmount: z.string().min(1),
-    totalAskCapacity: z.string().min(1),
-    orderCapacity: z.string().min(1),
+    price: z.string().min(1),
     paidCapacity: z.string().min(1),
     confirmedAtBlock: z.string().min(1),
   }),

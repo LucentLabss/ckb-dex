@@ -16,11 +16,15 @@ const paginationSchema = z.object({
 const orderQuerySchema = z.object({
   xudtTypeHash: z.string().min(1).optional(),
   makerLockHash: z.string().min(1).optional(),
+  direction: z.enum(["ASK", "BID"]).optional(),
   status: z.enum([
     "DISCOVERED",
     "LIVE",
+    "RESERVED",
+    "PENDING",
     "SETTLEMENT_SUBMITTED",
     "FILLED",
+    "CANCELED",
     "CANCELLED",
     "INVALID",
     "ORPHANED",
@@ -40,20 +44,34 @@ router.get("/markets", async (_req: Request, res: Response) => {
 router.get("/order-book", async (req: Request, res: Response) => {
   const query = paginationSchema.parse(req.query);
   const xudtTypeHash = typeof req.query.xudtTypeHash === "string" ? req.query.xudtTypeHash : undefined;
+  const direction = req.query.direction === "ASK" || req.query.direction === "BID" ? req.query.direction : undefined;
 
   const filter: Record<string, string> = { status: "LIVE" };
   if (xudtTypeHash) {
     filter.xudtTypeHash = xudtTypeHash;
   }
+  if (direction) {
+    filter.direction = direction;
+  }
 
-  const items = await OrderModel.find(filter as Record<string, unknown>)
-    .sort({ totalAskCapacity: 1, createdAt: 1, "outPoint.txHash": 1, "outPoint.index": 1 })
-    .limit(query.limit)
-    .lean();
+  const items = await OrderModel.find(filter as Record<string, unknown>).lean();
+  items.sort((left, right) => {
+    const leftPrice = BigInt(left.pricePerToken);
+    const rightPrice = BigInt(right.pricePerToken);
+    if (leftPrice !== rightPrice) {
+      const ascending = direction !== "BID";
+      return ascending === (leftPrice < rightPrice) ? -1 : 1;
+    }
+
+    const leftBlock = BigInt(left.blockNumber);
+    const rightBlock = BigInt(right.blockNumber);
+    if (leftBlock !== rightBlock) return leftBlock < rightBlock ? -1 : 1;
+    return BigInt(left.txIndex) < BigInt(right.txIndex) ? -1 : 1;
+  });
 
   return sendSuccess(res, "Order book fetched", {
     requestId: res.locals.requestId,
-    items,
+    items: items.slice(0, query.limit),
     nextCursor: undefined,
     limit: query.limit,
   });
@@ -82,6 +100,7 @@ router.get("/orders", async (req: Request, res: Response) => {
 
   if (query.makerLockHash) filter.makerLockHash = query.makerLockHash;
   if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
+  if (query.direction) filter.direction = query.direction;
   if (query.status) filter.status = query.status;
 
   const items = await OrderModel.find(filter)

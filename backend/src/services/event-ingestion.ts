@@ -160,19 +160,21 @@ export class EventIngestionService {
         txHash: event.outPoint.txHash,
         index: event.outPoint.index,
       },
-      orderCellLockHash: event.order.orderCellLockHash,
-      dexLockArgs: event.order.dexLockArgs,
-      typeScriptHash: event.order.typeScriptHash,
+      lockScript: event.order.lockScript,
+      typeScript: event.order.typeScript,
+      cellData: event.order.cellData,
+      capacity: event.order.capacity,
+      ownerLock: event.order.ownerLock,
+      ownerLockHash: event.order.ownerLockHash,
+      ownerAddress: event.order.ownerAddress,
+      direction: event.order.direction,
+      pricePerToken: event.order.pricePerToken,
+      remainingAmount: event.order.tokenAmount,
+      tokenPair: `${event.order.xudtTypeHash}:CKB`,
       xudtTypeHash: event.order.xudtTypeHash,
-      makerLockHash: event.order.makerLockHash,
-      makerAddress: event.order.makerAddress,
-      side: "SELL",
-      tokenAmount: event.order.tokenAmount,
-      orderCapacity: event.order.orderCapacity,
-      totalAskCapacity: event.order.totalAskCapacity,
+      blockNumber: event.order.blockNumber,
+      txIndex: event.order.txIndex,
       status: "LIVE",
-      createdAtBlock: event.order.createdAtBlock ?? event.blockNumber,
-      createdAtTxHash: event.order.createdAtTxHash,
       confirmedAtBlock: event.blockNumber,
       lastEventId: event.eventId,
     };
@@ -210,7 +212,7 @@ export class EventIngestionService {
       };
     }
 
-    await updateOrderStatus(order, "CANCELLED", event.eventId);
+    await updateOrderStatus(order, "CANCELED", event.eventId);
     order.confirmedAtBlock = event.blockNumber;
     order.settlementTxHash = event.cancelledByTxHash;
     await order.save();
@@ -219,10 +221,10 @@ export class EventIngestionService {
   }
 
   private async applySettlementSubmitted(event: SettlementSubmittedEvent): Promise<IngestionResult> {
-    const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
-    const order = await OrderModel.findById(orderId);
+    const orderIds = event.orderOutPoints.map((outPoint) => toOrderId(outPoint.txHash, outPoint.index));
+    const orders = await OrderModel.find({ _id: { $in: orderIds } });
 
-    if (order == undefined) {
+    if (orders.length !== event.orderOutPoints.length) {
       return {
         status: "IGNORED",
         eventId: event.eventId,
@@ -230,18 +232,21 @@ export class EventIngestionService {
       };
     }
 
-    if (!canTransition(order.status, "SETTLEMENT_SUBMITTED")) {
+    if (orders.some((order) => !canTransition(order.status, "PENDING"))) {
       return {
         status: "IGNORED",
         eventId: event.eventId,
-        reason: `invalid-transition-${order.status}-to-settlement-submitted`,
+        reason: "invalid-transition-to-pending",
       };
     }
 
-    order.status = "SETTLEMENT_SUBMITTED";
-    order.settlementTxHash = event.settlementTxHash;
-    order.lastEventId = event.eventId;
-    await order.save();
+    await Promise.all(orders.map(async (order) => {
+      order.status = "PENDING";
+      order.pendingTxHash = event.settlementTxHash;
+      order.settlementTxHash = event.settlementTxHash;
+      order.lastEventId = event.eventId;
+      await order.save();
+    }));
 
     return { status: "APPLIED", eventId: event.eventId };
   }
@@ -255,10 +260,11 @@ export class EventIngestionService {
       };
     }
 
-    const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
-    const order = await OrderModel.findById(orderId);
+    const buyOrderId = toOrderId(event.buyOrderOutPoint.txHash, event.buyOrderOutPoint.index);
+    const sellOrderId = toOrderId(event.sellOrderOutPoint.txHash, event.sellOrderOutPoint.index);
+    const orders = await OrderModel.find({ _id: { $in: [buyOrderId, sellOrderId] } });
 
-    if (order == undefined) {
+    if (orders.length !== 2) {
       return {
         status: "IGNORED",
         eventId: event.eventId,
@@ -266,12 +272,24 @@ export class EventIngestionService {
       };
     }
 
-    await updateOrderStatus(order, "FILLED", event.eventId);
-    order.confirmedAtBlock = event.trade.confirmedAtBlock;
-    order.settlementTxHash = event.trade.settlementTxHash;
-    await order.save();
+    if (orders.some((order) => !canTransition(order.status, "FILLED"))) {
+      return {
+        status: "IGNORED",
+        eventId: event.eventId,
+        reason: "invalid-transition-to-filled",
+      };
+    }
 
-    const tradeId = `${event.trade.settlementTxHash}:${event.outPoint.txHash}:${event.outPoint.index}`;
+    await Promise.all(orders.map(async (order) => {
+      order.status = "FILLED";
+      order.confirmedAtBlock = event.trade.confirmedAtBlock;
+      order.pendingTxHash = event.trade.settlementTxHash;
+      order.settlementTxHash = event.trade.settlementTxHash;
+      order.lastEventId = event.eventId;
+      await order.save();
+    }));
+
+    const tradeId = event.trade.settlementTxHash;
 
     await TradeModel.findByIdAndUpdate(
       tradeId,
@@ -279,16 +297,19 @@ export class EventIngestionService {
         $setOnInsert: {
           _id: tradeId,
           settlementTxHash: event.trade.settlementTxHash,
-          orderOutPoint: {
-            txHash: event.outPoint.txHash,
-            index: event.outPoint.index,
+          buyOrderOutPoint: {
+            txHash: event.buyOrderOutPoint.txHash,
+            index: event.buyOrderOutPoint.index,
           },
-          makerLockHash: event.trade.makerLockHash,
+          sellOrderOutPoint: {
+            txHash: event.sellOrderOutPoint.txHash,
+            index: event.sellOrderOutPoint.index,
+          },
           buyerLockHash: event.trade.buyerLockHash,
+          sellerLockHash: event.trade.sellerLockHash,
           xudtTypeHash: event.trade.xudtTypeHash,
           tokenAmount: event.trade.tokenAmount,
-          totalAskCapacity: event.trade.totalAskCapacity,
-          orderCapacity: event.trade.orderCapacity,
+          price: event.trade.price,
           paidCapacity: event.trade.paidCapacity,
           blockNumber: event.blockNumber ?? event.trade.confirmedAtBlock,
           blockHash: event.blockHash ?? "",
