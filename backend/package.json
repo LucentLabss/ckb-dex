@@ -11,6 +11,8 @@
     "@types/mongodb": "^4.0.7",
     "@types/mongoose": "^5.11.97",
     "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
+    "mongodb-memory-server": "^11.2.0",
     "tsx": "^4.23.12"
   },
   "peerDependencies": {
@@ -24,12 +26,15 @@
     "express": "^5.2.1",
     "helmet": "^8.3.0",
     "mongodb": "^7.5.0",
-    "mongoose": "^9.9.3"
+    "mongoose": "^9.9.3",
+    "zod": "^3.25.76"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
+    "test:schemas": "tsx --test src/schemas/bot-events.test.ts"
   }
 }

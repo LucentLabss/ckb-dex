@@ -1,3 +1,4 @@
+// Declares the strongly typed runtime configuration and CKB script shapes used by the backend.
 export type Hex = `0x${string}`;
 
 export type HashType = "data" | "type" | "data1" | "data2"
@@ -17,6 +18,7 @@ export interface Config {
   ckbRpcUrl: string,
   enviroment: NODE_ENV,
   dexOrderLockScript: Script,
+  internalBotToken: string,
   port: number,
   apiVersion: number
 }

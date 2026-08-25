@@ -1,15 +1,19 @@
-import express, {Request, Response} from "express";
+// Defines the legacy root API router and its basic welcome response.
+import { Router, Request, Response } from "express";
+import { sendSuccess } from "../utils";
 
-const router = express().router;
+const router = Router();
 
-router.get("/", (req: Request, res: Response) => {
-    console.info("Order route request:", req);
-    res.status(200).send("Order route reachable");
+router.get("/", (_req: Request, res: Response) => {
+    return sendSuccess(res, "Order route reachable", {
+        requestId: res.locals.requestId,
+    });
 })
 
-router.get("/trades", (req: Request, res: Response) => {
-    console.info("Trade route request:", req);
-    res.status(200).send("Trades route reachable");
+router.get("/trades", (_req: Request, res: Response) => {
+    return sendSuccess(res, "Trades route reachable", {
+        requestId: res.locals.requestId,
+    });
 })
 
 export default router;

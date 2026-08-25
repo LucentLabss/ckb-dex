@@ -1,3 +1,4 @@
+// Manages the backend's MongoDB connection lifecycle.
 import mongoose from "mongoose";
 import { DatabaseType } from "../types";
 import AppError from "./error.js";
@@ -8,16 +9,20 @@ export class Database implements DatabaseType {
     }
 
     public async connect() {
-        mongoose.connect(this.mongodb_url)
-        .then(() => console.log("Connected to DB successfully"))
-        .catch((err) => {
-            console.error(err);
-            throw(new AppError(500, "Internal server database error"))
-        });
+        try {
+            await mongoose.connect(this.mongodb_url);
+            console.log("Connected to DB successfully");
+        } catch (error) {
+            console.error(error);
+            throw(new AppError(500, "Internal server database error"));
+        }
     };
 
     public async disconnect() {
-        mongoose.disconnect();
-        process.exit(1);
+        await mongoose.disconnect();
+    };
+
+    public isConnected() {
+        return mongoose.connection.readyState === 1;
     };
 }

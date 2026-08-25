@@ -1,3 +1,4 @@
+// Provides shared API response helpers and CKB-oriented value conversion utilities.
 import { Response } from "express";
 import { AppApiResponse, DexLockArgs, HashType, Hex, OrderType, Script } from "../types";
 import AppError from "../services/error.js";
@@ -17,6 +18,8 @@ export function sendSucess<T>(
     status
   } as AppApiResponse<T>)
 }
+
+export const sendSuccess = sendSucess;
 
 export function sendError<T>(
   res: Response,

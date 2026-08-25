@@ -1,58 +1,92 @@
+// Defines the MongoDB projection for a single supported xUDT sell-order cell and its lifecycle.
 import mongoose, { Schema } from "mongoose";
 
-const ScriptSchema = new Schema({
-  codeHash: { type: String, required: true },
-  hashType: { type: String, enum: ["data", "type", "data1", "data2"], required: true },
-  args:     { type: String, required: true },
-}, { _id: false });
+export type OrderStatus =
+  | "DISCOVERED"
+  | "LIVE"
+  | "SETTLEMENT_SUBMITTED"
+  | "FILLED"
+  | "CANCELLED"
+  | "INVALID"
+  | "ORPHANED";
 
-export const OrderSchema = new Schema({
-  _id: { type: String },                      // `${txHash}:${index}`
-
+export interface OrderDocument {
+  _id: string;
   outPoint: {
+    txHash: string;
+    index: string;
+  };
+  orderCellLockHash: string;
+  dexLockArgs: string;
+  typeScriptHash: string;
+  xudtTypeHash: string;
+  makerLockHash: string;
+  makerAddress?: string;
+  side: "SELL";
+  tokenAmount: string;
+  orderCapacity: string;
+  totalAskCapacity: string;
+  status: OrderStatus;
+  createdAtBlock?: string;
+  createdAtTxHash: string;
+  confirmedAtBlock?: string;
+  settlementTxHash?: string;
+  lastEventId: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const OutPointSchema = new Schema(
+  {
     txHash: { type: String, required: true },
-    index:  { type: Number, required: true },
+    index: { type: String, required: true },
   },
+  { _id: false },
+);
 
-  // CANONICAL: byte-exact, straight from the indexer, never re-derived
-  lockScript: { type: ScriptSchema, required: true },   // the DEX lock
-  typeScript: { type: ScriptSchema, required: true },   // the xUDT script
-  cellData:   { type: String, required: true },
-  capacity:   { type: String, required: true },         // shannons
+export const ORDER_STATUS_VALUES: OrderStatus[] = [
+  "DISCOVERED",
+  "LIVE",
+  "SETTLEMENT_SUBMITTED",
+  "FILLED",
+  "CANCELLED",
+  "INVALID",
+  "ORPHANED",
+];
 
-  // PROJECTION: decoded from lockScript.args, for querying and building
-  ownerLock:     { type: ScriptSchema, required: true },  // ← used for payouts
-  ownerLockHash: { type: String, required: true, index: true },
-  ownerAddress:  { type: String, required: true },        // display only
-
-  direction:      { type: String, enum: ["BID", "ASK"], required: true },
-  pricePerToken:  { type: Schema.Types.Decimal128, required: true }, // shannons/token
-  remainingAmount:{ type: String, required: true },       // u128 as string
-  receivedAmount: { type: String, default: "0" },         // bids only
-
-  tokenPair:   { type: String, required: true, index: true },
-  udtTypeHash: { type: String, required: true },
-
-  // chain position: the real time axis for price-time priority
-  blockNumber: { type: Number, required: true },
-  txIndex:     { type: Number, required: true },
-
-  // bot coordination: yours alone, nothing on chain
-  status: {
-    type: String,
-    enum: ["LIVE", "RESERVED", "PENDING", "FILLED", "CANCELED"],
-    required: true,
-    default: "LIVE",
+export const OrderSchema = new Schema<OrderDocument>(
+  {
+    _id: { type: String, required: true },
+    outPoint: { type: OutPointSchema, required: true },
+    orderCellLockHash: { type: String, required: true },
+    dexLockArgs: { type: String, required: true },
+    typeScriptHash: { type: String, required: true },
+    xudtTypeHash: { type: String, required: true },
+    makerLockHash: { type: String, required: true },
+    makerAddress: { type: String },
+    side: { type: String, enum: ["SELL"], required: true, default: "SELL" },
+    tokenAmount: { type: String, required: true },
+    orderCapacity: { type: String, required: true },
+    totalAskCapacity: { type: String, required: true },
+    status: {
+      type: String,
+      enum: ORDER_STATUS_VALUES,
+      required: true,
+      default: "DISCOVERED",
+    },
+    createdAtBlock: { type: String },
+    createdAtTxHash: { type: String, required: true },
+    confirmedAtBlock: { type: String },
+    settlementTxHash: { type: String },
+    lastEventId: { type: String, required: true },
   },
-  reservedUntil: { type: Date, default: null },
-  pendingTxHash: { type: String, default: null },
-}, { timestamps: true });
+  { timestamps: true },
+);
 
-// The matching query. Direction is in the key so each side scans only its own.
-OrderSchema.index({ tokenPair: 1, direction: 1, status: 1, pricePerToken: 1, blockNumber: 1, txIndex: 1 });
-// "my orders"
-OrderSchema.index({ ownerLockHash: 1, status: 1 });
-// reservation sweeper
-OrderSchema.index({ status: 1, reservedUntil: 1 });
+OrderSchema.index({ "outPoint.txHash": 1, "outPoint.index": 1 }, { unique: true });
+OrderSchema.index({ xudtTypeHash: 1, status: 1, totalAskCapacity: 1, createdAtBlock: 1 });
+OrderSchema.index({ makerLockHash: 1, createdAt: -1 });
+OrderSchema.index({ settlementTxHash: 1 });
 
-export default mongoose.model("Order", OrderSchema);
+const OrderModel = mongoose.model<OrderDocument>("Order", OrderSchema);
+export default OrderModel;

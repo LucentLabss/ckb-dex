@@ -1,3 +1,4 @@
+// Defines the application error type used for controlled HTTP error responses.
 /**
  *@class AppError -> Error type wrapper to allow custom error rather than a generic error message with call stack detail
  */
