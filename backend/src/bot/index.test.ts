@@ -85,3 +85,184 @@ describe("DexOrderBot.sort", () => {
     assert.deepEqual(labelsOf(input), ["a", "b"]);
   });
 });
+
+function fakePairOrder(
+  label: string,
+  direction: "ASK" | "BID",
+  udtTypeHash: string,
+  tokenAmount: string,
+  price: string,
+  blockNumber = 0,
+  txIndex = 0,
+): OrderDoc {
+  return {
+    label,
+    direction,
+    udtTypeHash,
+    remainingAmount: tokenAmount,
+    pricePerToken: new mongoose.Types.Decimal128(price),
+    blockNumber,
+    txIndex,
+  } as unknown as OrderDoc;
+}
+
+describe("DexOrderBot.findMatch", () => {
+  const bot = new DexOrderBot(config);
+  const tokenA = "0xaaaa000000000000000000000000000000000000000000000000000000aaaa";
+  const tokenB = "0xbbbb000000000000000000000000000000000000000000000000000000bbbb";
+
+  test("matches a BUY and SELL that share token, amount and price", () => {
+    const buy = fakePairOrder("buy", "BID", tokenA, "1000", "500");
+    const sell = fakePairOrder("sell", "ASK", tokenA, "1000", "500");
+
+    const match = bot.findMatch([buy, sell]);
+
+    assert.equal((match?.buy as unknown as { label: string })?.label, "buy");
+    assert.equal((match?.sell as unknown as { label: string })?.label, "sell");
+  });
+
+  test("does not match orders for different tokens, amounts, or prices", () => {
+    const buy = fakePairOrder("buy", "BID", tokenA, "1000", "500");
+    const wrongToken = fakePairOrder("wrongToken", "ASK", tokenB, "1000", "500");
+    const wrongAmount = fakePairOrder("wrongAmount", "ASK", tokenA, "999", "500");
+    const wrongPrice = fakePairOrder("wrongPrice", "ASK", tokenA, "1000", "501");
+
+    const match = bot.findMatch([buy, wrongToken, wrongAmount, wrongPrice]);
+
+    assert.equal(match, undefined);
+  });
+
+  test("does not match two orders on the same side", () => {
+    const sellOne = fakePairOrder("sellOne", "ASK", tokenA, "1000", "500");
+    const sellTwo = fakePairOrder("sellTwo", "ASK", tokenA, "1000", "500");
+
+    const match = bot.findMatch([sellOne, sellTwo]);
+
+    assert.equal(match, undefined);
+  });
+
+  test("picks the oldest order on each side when multiple match", () => {
+    const earlierBuy = fakePairOrder("earlierBuy", "BID", tokenA, "1000", "500", 5, 0);
+    const laterBuy = fakePairOrder("laterBuy", "BID", tokenA, "1000", "500", 10, 0);
+    const earlierSell = fakePairOrder("earlierSell", "ASK", tokenA, "1000", "500", 5, 0);
+    const laterSell = fakePairOrder("laterSell", "ASK", tokenA, "1000", "500", 10, 0);
+
+    const match = bot.findMatch([laterBuy, laterSell, earlierBuy, earlierSell]);
+
+    assert.equal((match?.buy as unknown as { label: string })?.label, "earlierBuy");
+    assert.equal((match?.sell as unknown as { label: string })?.label, "earlierSell");
+  });
+});
+
+describe("DexOrderBot.deserializeLockScriptAndArgs", () => {
+  const bot = new DexOrderBot(config);
+
+  function buildArgs(opts: {
+    version?: number;
+    side: number;
+    makerLockHash: string;
+    udtTypeHash: string;
+    tokenAmount: bigint;
+    price: bigint;
+  }): `0x${string}` {
+    const buf = Buffer.alloc(90);
+    buf.writeUInt8(opts.version ?? 1, 0);
+    buf.writeUInt8(opts.side, 1);
+    Buffer.from(opts.makerLockHash.slice(2), "hex").copy(buf, 2);
+    Buffer.from(opts.udtTypeHash.slice(2), "hex").copy(buf, 34);
+    buf.writeBigUInt64LE(opts.tokenAmount, 66); // low 8 of the 16-byte LE amount
+    buf.writeBigUInt64LE(0n, 74); // high 8 of the 16-byte LE amount (0 for these small test values)
+    buf.writeBigUInt64LE(opts.price, 82);
+    return `0x${buf.toString("hex")}` as `0x${string}`;
+  }
+
+  const makerLockHash = `0x${"11".repeat(32)}` as `0x${string}`;
+  const udtTypeHash = `0x${"22".repeat(32)}` as `0x${string}`;
+
+  test("decodes a SELL (ASK) order", () => {
+    const args = buildArgs({
+      side: 1,
+      makerLockHash,
+      udtTypeHash,
+      tokenAmount: 1000n,
+      price: 500n,
+    });
+
+    const decoded = bot.deserializeLockScriptAndArgs({
+      codeHash: config.dexOrderLockScript.codeHash,
+      hashType: config.dexOrderLockScript.hashType,
+      args,
+    });
+
+    assert.equal(decoded.direction, "ASK");
+    assert.equal(decoded.makerLockHash, makerLockHash);
+    assert.equal(decoded.udtTypeHash, udtTypeHash);
+    assert.equal(decoded.tokenAmount, 1000n);
+    assert.equal(decoded.pricePerToken, 500n);
+  });
+
+  test("decodes a BUY (BID) order", () => {
+    const args = buildArgs({
+      side: 0,
+      makerLockHash,
+      udtTypeHash,
+      tokenAmount: 42n,
+      price: 7n,
+    });
+
+    const decoded = bot.deserializeLockScriptAndArgs({
+      codeHash: config.dexOrderLockScript.codeHash,
+      hashType: config.dexOrderLockScript.hashType,
+      args,
+    });
+
+    assert.equal(decoded.direction, "BID");
+  });
+
+  test("rejects args of the wrong length", () => {
+    assert.throws(() =>
+      bot.deserializeLockScriptAndArgs({
+        codeHash: config.dexOrderLockScript.codeHash,
+        hashType: config.dexOrderLockScript.hashType,
+        args: "0x00",
+      }),
+    );
+  });
+
+  test("rejects an unsupported version byte", () => {
+    const args = buildArgs({
+      version: 2,
+      side: 1,
+      makerLockHash,
+      udtTypeHash,
+      tokenAmount: 1n,
+      price: 1n,
+    });
+
+    assert.throws(() =>
+      bot.deserializeLockScriptAndArgs({
+        codeHash: config.dexOrderLockScript.codeHash,
+        hashType: config.dexOrderLockScript.hashType,
+        args,
+      }),
+    );
+  });
+
+  test("rejects a script from a different code hash", () => {
+    const args = buildArgs({
+      side: 1,
+      makerLockHash,
+      udtTypeHash,
+      tokenAmount: 1n,
+      price: 1n,
+    });
+
+    assert.throws(() =>
+      bot.deserializeLockScriptAndArgs({
+        codeHash: `0x${"00".repeat(32)}`,
+        hashType: "data2",
+        args,
+      }),
+    );
+  });
+});

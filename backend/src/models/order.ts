@@ -16,7 +16,7 @@ export const OrderSchema = new Schema({
 
   // CANONICAL: byte-exact, straight from the indexer, never re-derived
   lockScript: { type: ScriptSchema, required: true },   // the DEX lock
-  typeScript: { type: ScriptSchema, required: true },   // the xUDT script
+  typeScript: { type: ScriptSchema, required: false },  // the xUDT script; absent for BUY orders, which hold plain CKB
   cellData:   { type: String, required: true },
   capacity:   { type: String, required: true },         // shannons
 
