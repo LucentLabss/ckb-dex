@@ -1,7 +1,7 @@
 import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
-import { Config, Hex, OrderType, Script } from "../types";
+import { Config, Hex, Script } from "../types";
 import AppError from "../services/error.js";
 import { toBuffer, toHex } from "../utils/index.js";
 import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
@@ -10,41 +10,65 @@ import systemScriptsJson from "../../../deployment/system-scripts.json" with { t
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
 /**
- * POC dex-order-lock args layout: makerLockHash(32) + orderType(1) + pricePerToken(8, LE).
- * The full owner lock script is deliberately NOT embedded on-chain yet - it is recovered
- * from the inputs of the transaction that created the order cell (see resolveOwnerLock).
- * A future production contract revision is expected to either carry the full owner lock
- * script in args or move it into a witness; this decoder targets the current POC layout.
+ * dex-order-lock args layout (see smart-contract/contracts/dex-order-lock/src/main.rs):
+ *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE) = 90 bytes.
+ * `side` is BUY(0)/SELL(1) on the wire - unrelated to, and not interchangeable with,
+ * the OrderType enum in ../types. As before, the full owner lock script is not embedded
+ * on-chain - it is recovered from the inputs of the transaction that created the order
+ * cell (see resolveOwnerLock/findInputWithLockHash), since the dex-lock script never
+ * runs at cell creation and the maker hash in args is otherwise unauthenticated.
  */
-const MAKER_HASH_LENGTH = 32;
-const ORDER_TYPE_LENGTH = 1;
-const PRICE_LENGTH = 8;
-const DEX_ORDER_ARGS_LENGTH = MAKER_HASH_LENGTH + ORDER_TYPE_LENGTH + PRICE_LENGTH;
+const ORDER_VERSION = 1;
+const SIDE_BUY = 0;
+const SIDE_SELL = 1;
+
+const HASH_LEN = 32;
+const AMOUNT_LEN = 16;
+const PRICE_LEN = 8;
+const ORDER_ARGS_LEN = 1 + 1 + HASH_LEN + HASH_LEN + AMOUNT_LEN + PRICE_LEN;
 
 export interface DecodedDexOrderArgs {
   makerLockHash: Hex;
-  orderType: OrderType;
+  direction: "ASK" | "BID";
+  udtTypeHash: Hex;
+  tokenAmount: bigint;
   pricePerToken: bigint;
 }
 
 function decodeDexOrderArgs(args: Hex): DecodedDexOrderArgs {
   const buf = toBuffer(args);
-  if (buf.length !== DEX_ORDER_ARGS_LENGTH) {
+  if (buf.length !== ORDER_ARGS_LEN) {
     throw new AppError(
       400,
-      `dex order args must be ${DEX_ORDER_ARGS_LENGTH} bytes, got ${buf.length}`,
+      `dex order args must be ${ORDER_ARGS_LEN} bytes, got ${buf.length}`,
     );
   }
 
-  const orderType = buf.readUInt8(MAKER_HASH_LENGTH);
-  if (orderType !== OrderType.ASK && orderType !== OrderType.BID) {
-    throw new AppError(400, `unknown order type byte ${orderType}`);
+  const version = buf.readUInt8(0);
+  if (version !== ORDER_VERSION) {
+    throw new AppError(400, `unsupported dex order args version ${version}`);
   }
 
+  const side = buf.readUInt8(1);
+  if (side !== SIDE_BUY && side !== SIDE_SELL) {
+    throw new AppError(400, `unknown order side byte ${side}`);
+  }
+
+  let offset = 2;
+  const makerLockHash = toHex(buf.subarray(offset, offset + HASH_LEN));
+  offset += HASH_LEN;
+  const udtTypeHash = toHex(buf.subarray(offset, offset + HASH_LEN));
+  offset += HASH_LEN;
+  const tokenAmount = ccc.numLeFromBytes(toHex(buf.subarray(offset, offset + AMOUNT_LEN)));
+  offset += AMOUNT_LEN;
+  const pricePerToken = buf.readBigUInt64LE(offset);
+
   return {
-    makerLockHash: toHex(buf.subarray(0, MAKER_HASH_LENGTH)),
-    orderType,
-    pricePerToken: buf.readBigUInt64LE(MAKER_HASH_LENGTH + ORDER_TYPE_LENGTH),
+    makerLockHash,
+    direction: side === SIDE_SELL ? "ASK" : "BID",
+    udtTypeHash,
+    tokenAmount,
+    pricePerToken,
   };
 }
 
@@ -96,7 +120,7 @@ interface DexOrderBotTrait {
     status: "FILLED" | "CANCELED",
     txHash?: Hex,
   ): Promise<void>;
-  executeTrade(order: OrderDoc, taker: ccc.Signer): Promise<Hex>;
+  executeTrade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex>;
   retryFailSwaps(): Promise<void>;
 }
 
@@ -135,7 +159,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
     return this._pendingPairOrders;
   }
 
-  /** Starts the poll loop: scan -> reconcile liveness -> sweep stale reservations -> refresh book. */
+  /** Starts the poll loop: scan -> reconcile liveness -> sweep stale reservations -> refresh book -> match. */
   start(): void {
     if (this.pollTimer) return;
 
@@ -145,6 +169,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
         await this.sweepTrackedOrders();
         await this.retryFailSwaps();
         await this.refreshPendingPairOrders();
+        await this.matchPendingOrders();
       } catch (err) {
         console.error("DexOrderBot poll cycle failed:", err);
       }
@@ -173,8 +198,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
       const priceDelta = a.direction === "ASK" ? priceA - priceB : priceB - priceA;
       if (priceDelta !== 0n) return priceDelta < 0n ? -1 : 1;
 
-      if (a.blockNumber !== b.blockNumber) return a.blockNumber - b.blockNumber;
-      return a.txIndex - b.txIndex;
+      if (a.blockNumber !== b.blockNumber) {
+        return BigInt(a.blockNumber) < BigInt(b.blockNumber) ? -1 : 1;
+      }
+      if (a.txIndex !== b.txIndex) {
+        return BigInt(a.txIndex) < BigInt(b.txIndex) ? -1 : 1;
+      }
+      return 0;
     });
   }
 
@@ -252,69 +282,122 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /**
-   * Builds and submits the settlement transaction that fills a LIVE ASK order, paying the
-   * maker (order.capacity + price) and delivering the tokens to the taker. Mirrors exactly
-   * what the dex-order-lock contract's fill path validates (see smart-contract main.rs).
+   * Builds and submits the settlement transaction that crosses one BUY order against one
+   * SELL order sharing the same token/amount/price - exactly what the dex-order-lock
+   * contract's match path validates (see smart-contract main.rs / tests.rs). No signer is
+   * needed: the lock script has no signature check, only structural rules, and the BUY
+   * order is expected to be pre-funded to cover price + its own settlement output + fee.
    */
-  async executeTrade(order: OrderDoc, taker: ccc.Signer): Promise<Hex> {
-    if (order.direction !== "ASK") {
-      throw new AppError(400, `only ASK orders can be filled directly; got ${order.direction}`);
+  async executeTrade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex> {
+    if (buyOrder.direction !== "BID" || sellOrder.direction !== "ASK") {
+      throw new AppError(400, "executeTrade requires a BID (buy) order and an ASK (sell) order");
+    }
+    if (
+      buyOrder.xudtTypeHash !== sellOrder.xudtTypeHash ||
+      buyOrder.remainingAmount !== sellOrder.remainingAmount ||
+      buyOrder.pricePerToken.toString() !== sellOrder.pricePerToken.toString()
+    ) {
+      throw new AppError(400, "buy and sell orders do not share the same token, amount and price");
     }
 
-    const reserved = await Order.findOneAndUpdate(
-      { _id: order._id, status: "LIVE" },
-      { $set: { status: "RESERVED", reservedUntil: new Date(Date.now() + RESERVATION_TTL_MS) } },
-      { new: true },
-    );
-    if (!reserved) {
-      throw new AppError(409, `order ${order._id} is not LIVE (already reserved or resolved)`);
+    const sellCapacity = BigInt(sellOrder.capacity);
+    const price = BigInt(sellOrder.pricePerToken.toString());
+
+    const tx = ccc.Transaction.from({
+      inputs: [
+        {
+          previousOutput: {
+            txHash: buyOrder.outPoint!.txHash,
+            index: buyOrder.outPoint!.index,
+          },
+          since: 0,
+        },
+        {
+          previousOutput: {
+            txHash: sellOrder.outPoint!.txHash,
+            index: sellOrder.outPoint!.index,
+          },
+          since: 0,
+        },
+      ],
+      outputs: [
+        { capacity: sellCapacity + price, lock: sellOrder.ownerLock },
+        { lock: buyOrder.ownerLock, type: sellOrder.typeScript },
+      ],
+      outputsData: ["0x", sellOrder.cellData as Hex],
+    });
+
+    // The buyer's token cell capacity is auto-computed as its minimal occupied capacity;
+    // the buy order must have been funded with at least price + that amount up front.
+    const buyerTokenCapacity = tx.outputs[1].capacity;
+    const buyCapacity = BigInt(buyOrder.capacity);
+    if (buyCapacity < price + buyerTokenCapacity) {
+      throw new AppError(
+        409,
+        `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell`,
+      );
+    }
+
+    const reservedBuy = await this.reserve(buyOrder._id!);
+    if (!reservedBuy) {
+      throw new AppError(409, `buy order ${buyOrder._id} is no longer LIVE`);
+    }
+
+    const reservedSell = await this.reserve(sellOrder._id!);
+    if (!reservedSell) {
+      await this.revertToLive(reservedBuy._id!);
+      throw new AppError(409, `sell order ${sellOrder._id} is no longer LIVE`);
     }
 
     try {
-      const stillLive = await this.checkOrderLiveness(reserved);
-      if (!stillLive) {
-        throw new AppError(409, `order ${order._id} was already settled on-chain`);
+      const [buyStillLive, sellStillLive] = await Promise.all([
+        this.checkOrderLiveness(reservedBuy),
+        this.checkOrderLiveness(reservedSell),
+      ]);
+      if (!buyStillLive || !sellStillLive) {
+        throw new AppError(409, "one of the matched orders was already settled on-chain");
       }
-
-      const orderCapacity = BigInt(reserved.capacity);
-      const askPrice = BigInt(reserved.pricePerToken.toString());
-      const takerLock = (await taker.getRecommendedAddressObj()).script;
-
-      const tx = ccc.Transaction.from({
-        inputs: [
-          {
-            previousOutput: {
-              txHash: reserved.outPoint!.txHash,
-              index: reserved.outPoint!.index,
-            },
-            since: 0,
-          },
-        ],
-        outputs: [
-          { capacity: orderCapacity + askPrice, lock: reserved.ownerLock },
-          { capacity: orderCapacity, lock: takerLock, type: reserved.typeScript },
-        ],
-        outputsData: ["0x", reserved.cellData as Hex],
-      });
 
       tx.addCellDeps(this.dexCellDeps);
       tx.addCellDeps(this.xudtCellDeps);
 
-      await tx.completeInputsByCapacity(taker);
-      await tx.completeFeeBy(taker, 1_000);
+      const txHash = await this.client.sendTransaction(tx);
 
-      const txHash = await taker.sendTransaction(tx);
-
-      await Order.updateOne(
-        { _id: reserved._id },
-        { $set: { status: "PENDING", pendingTxHash: txHash } },
-      );
+      await Promise.all([
+        Order.updateOne({ _id: reservedBuy._id }, { $set: { status: "PENDING", pendingTxHash: txHash } }),
+        Order.updateOne({ _id: reservedSell._id }, { $set: { status: "PENDING", pendingTxHash: txHash } }),
+      ]);
 
       return txHash;
     } catch (err) {
-      await this.revertToLive(reserved._id!);
+      await Promise.all([
+        this.revertToLive(reservedBuy._id!),
+        this.revertToLive(reservedSell._id!),
+      ]);
       throw err;
     }
+  }
+
+  /**
+   * Finds the first exact-match pair (same udtTypeHash + tokenAmount + price, one BUY and
+   * one SELL) among `orders`, preferring the oldest order on each side within a match.
+   */
+  findMatch(orders: OrderDoc[]): { buy: OrderDoc; sell: OrderDoc } | undefined {
+    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+
+    for (const order of this.sort(orders)) {
+      const key = this.matchGroupKey(order);
+      const bucket = groups.get(key) ?? { buys: [], sells: [] };
+      (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
+      groups.set(key, bucket);
+    }
+
+    for (const { buys, sells } of groups.values()) {
+      if (buys.length > 0 && sells.length > 0) {
+        return { buy: buys[0], sell: sells[0] };
+      }
+    }
+    return undefined;
   }
 
   /** Sweeps expired RESERVED/PENDING orders: confirms, reverts to LIVE, or extends the reservation. */
@@ -350,6 +433,32 @@ export default class DexOrderBot implements DexOrderBotTrait {
     }
   }
 
+  private async matchPendingOrders(): Promise<void> {
+    const match = this.findMatch(this._pendingPairOrders);
+    if (!match) return;
+
+    try {
+      const txHash = await this.executeTrade(match.buy, match.sell);
+      console.info(
+        `DexOrderBot matched buy ${match.buy._id} with sell ${match.sell._id}: ${txHash}`,
+      );
+    } catch (err) {
+      console.error("DexOrderBot match execution failed:", err);
+    }
+  }
+
+  private matchGroupKey(order: OrderDoc): string {
+    return `${order.xudtTypeHash}:${order.remainingAmount}:${order.pricePerToken.toString()}`;
+  }
+
+  private async reserve(orderId: string): Promise<OrderDoc | null> {
+    return Order.findOneAndUpdate(
+      { _id: orderId, status: "LIVE" },
+      { $set: { status: "RESERVED", reservedUntil: new Date(Date.now() + RESERVATION_TTL_MS) } },
+      { new: true },
+    );
+  }
+
   private async resolveScanCursor(): Promise<bigint> {
     if (this.lastScannedBlock !== undefined) {
       return this.lastScannedBlock + 1n;
@@ -363,17 +472,35 @@ export default class DexOrderBot implements DexOrderBotTrait {
     const id = `${cell.outPoint.txHash}:${cell.outPoint.index}`;
     if (await Order.exists({ _id: id })) return undefined;
 
-    if (!cell.cellOutput.type) {
-      console.warn(`skipping dex order cell ${id}: missing type script`);
-      return undefined;
-    }
-
     let decoded: DecodedDexOrderArgs;
     try {
       decoded = this.deserializeLockScriptAndArgs(cell.cellOutput.lock);
     } catch (err) {
       console.warn(`skipping dex order cell ${id}: ${(err as Error).message}`);
       return undefined;
+    }
+
+    if (decoded.direction === "ASK") {
+      // A SELL order cell must hold exactly the declared xUDT and amount up front.
+      if (!cell.cellOutput.type || cell.cellOutput.type.hash() !== decoded.udtTypeHash) {
+        console.warn(`skipping dex order cell ${id}: missing or mismatched xUDT type script`);
+        return undefined;
+      }
+      const heldAmount = this.decodeUdtAmount(cell.outputData);
+      if (heldAmount === undefined || heldAmount !== decoded.tokenAmount) {
+        console.warn(`skipping dex order cell ${id}: cell token amount does not match declared args`);
+        return undefined;
+      }
+    } else {
+      // A BUY order cell must hold plain CKB only - no type script, no token data.
+      if (cell.cellOutput.type) {
+        console.warn(`skipping dex order cell ${id}: BUY order cell must not carry a type script`);
+        return undefined;
+      }
+      if (cell.cellOutput.capacity <= decoded.pricePerToken) {
+        console.warn(`skipping dex order cell ${id}: BUY order capacity does not exceed its own price`);
+        return undefined;
+      }
     }
 
     const creatingTx = await this.client.getTransaction(cell.outPoint.txHash);
@@ -397,11 +524,6 @@ export default class DexOrderBot implements DexOrderBotTrait {
     }
 
     const ownerAddress = ccc.Address.fromScript(ownerLock, this.client).toString();
-    const remainingAmount = this.decodeUdtAmount(cell.outputData);
-    if (remainingAmount === undefined) {
-      console.warn(`skipping dex order cell ${id}: malformed xUDT amount`);
-      return undefined;
-    }
 
     return Order.findOneAndUpdate(
       { _id: id },
@@ -416,11 +538,11 @@ export default class DexOrderBot implements DexOrderBotTrait {
           ownerLock,
           ownerLockHash: decoded.makerLockHash,
           ownerAddress,
-          direction: decoded.orderType === OrderType.BID ? "BID" : "ASK",
+          direction: decoded.direction,
           pricePerToken: decoded.pricePerToken.toString(),
-          remainingAmount: remainingAmount.toString(),
-          tokenPair: `${cell.cellOutput.type.hash()}:CKB`,
-          udtTypeHash: cell.cellOutput.type.hash(),
+          remainingAmount: decoded.tokenAmount.toString(),
+          tokenPair: `${decoded.udtTypeHash}:CKB`,
+          udtTypeHash: decoded.udtTypeHash,
           blockNumber: Number(creatingTx.blockNumber),
           txIndex: Number(creatingTx.txIndex ?? 0n),
           status: "LIVE",
@@ -461,7 +583,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (!spendingTx || spendingTx.status !== "committed") return;
 
     // Mirrors the contract's own rule: the spend is a maker cancellation iff one of its
-    // inputs carries the maker's lock hash; otherwise it's a taker fill.
+    // inputs carries the maker's lock hash; otherwise it's a match settlement.
     const cancellationInput = await this.findInputWithLockHash(
       spendingTx.transaction,
       order.ownerLockHash as Hex,
