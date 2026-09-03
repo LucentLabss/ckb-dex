@@ -32,7 +32,7 @@ export let config: Config | undefined = undefined;
   dexOrderBot.start();
 
   const shutdown = async (): Promise<void> => {
-    console.info('Shutting down Veil backend API');
+    console.info('Shutting down CKB Dex backend API');
     dexOrderBot.stop();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
