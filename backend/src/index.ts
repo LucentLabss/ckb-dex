@@ -1,5 +1,6 @@
 // Starts the backend HTTP and WebSocket services after MongoDB is ready and handles graceful shutdown.
 import { createExpressServer } from "./app.js";
+import DexOrderBot from "./bot/index.js";
 import AppConfiguration from "./config.js";
 import { Database } from "./services";
 import { Config } from "./types";
@@ -26,14 +27,20 @@ export let config: Config | undefined = undefined;
     realtime.attach(server);
   }
 
+  //Start dex order bot
+  const dexOrderBot = new DexOrderBot(config);
+  dexOrderBot.start();
+
   const shutdown = async (): Promise<void> => {
-    console.info('Shutting down Veil backend API');
+    console.info('Shutting down CKB Dex backend API');
+    dexOrderBot.stop();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) reject(error);
         else resolve();
       });
     });
+
     await databaseConnection.disconnect();
   };
 
