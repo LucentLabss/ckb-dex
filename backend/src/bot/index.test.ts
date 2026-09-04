@@ -12,7 +12,7 @@ const config: Config = {
   ckbRpcUrl: "http://127.0.0.1:8114",
   enviroment: "development",
   dexOrderLockScript: {
-    codeHash: "0x2ac318d6f1593c62bda4575a4151f9026a4451005360149f746e28524ca3d980",
+    codeHash: "0xcf8604433cfbd424e8fd32f0c59aca23ab09e528eb3e3281519ad6451f636b51",
     hashType: "data2",
     args: "0x",
   },

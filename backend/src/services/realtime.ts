@@ -141,8 +141,8 @@ export class RealtimeBroadcaster {
     }
 
     if (channel.startsWith("maker:" ) && channel.endsWith(":orders")) {
-      const makerLockHash = channel.slice("maker:".length, -":orders".length);
-      return OrderModel.find({ makerLockHash }).sort({ createdAt: -1, _id: -1 }).lean();
+      const ownerLockHash = channel.slice("maker:".length, -":orders".length);
+      return OrderModel.find({ ownerLockHash }).sort({ createdAt: -1, _id: -1 }).lean();
     }
 
     return [];

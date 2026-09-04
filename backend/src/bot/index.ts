@@ -129,6 +129,8 @@ interface DexOrderBotTrait {
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const RESERVATION_TTL_MS = 5 * 60 * 1_000;
+// Matches the fixed fee rate the UI uses for its own order transactions (see ui/src/lib/dex.ts).
+const SETTLEMENT_FEE_RATE = 1_000n;
 
 export default class DexOrderBot implements DexOrderBotTrait {
   readonly config: Config;
@@ -153,6 +155,11 @@ export default class DexOrderBot implements DexOrderBotTrait {
         ccc.KnownScript,
         ccc.ScriptInfoLike | undefined
       >,
+      // Without this, ClientPublicTestnet defaults to public testnet.ckb.dev/ckbapp.dev
+      // fallbacks - so any hiccup talking to the local devnet node silently redirects the
+      // bot at a real public network instead of failing fast (see ui/src/App.tsx's ckbClient,
+      // which already sets this for the same reason).
+      fallbacks: [],
     });
 
     this.dexCellDeps = resolveDexCellDeps(config.dexOrderLockScript);
@@ -331,14 +338,21 @@ export default class DexOrderBot implements DexOrderBotTrait {
       outputsData: ["0x", sellOrder.cellData as Hex],
     });
 
-    // The buyer's token cell capacity is auto-computed as its minimal occupied capacity;
-    // the buy order must have been funded with at least price + that amount up front.
+    // The seller's output must be at least capacity + price with no tolerance (the contract's
+    // validate_sell_order rejects anything less as ERROR_SELLER_UNDERPAID) - the fee can't come
+    // out of this side. It has to be unclaimed surplus on the buyer's input instead: CKB treats
+    // any gap between total inputs and total outputs as the fee automatically, so the buy order
+    // must have been funded with a little more than price + its token cell's minimal capacity.
+    // The tx carries no witnesses (this lock has no signature check), but the node still sizes
+    // the fee against the witness placeholders it expects per input group - pad the estimate
+    // rather than replicate that accounting exactly; a few thousand extra shannons is immaterial.
     const buyerTokenCapacity = tx.outputs[1].capacity;
+    const fee = tx.estimateFee(SETTLEMENT_FEE_RATE) + 5_000n;
     const buyCapacity = BigInt(buyOrder.capacity);
-    if (buyCapacity < price + buyerTokenCapacity) {
+    if (buyCapacity < price + buyerTokenCapacity + fee) {
       throw new AppError(
         409,
-        `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell`,
+        `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell + the network fee`,
       );
     }
 
@@ -367,10 +381,17 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
       const txHash = await this.client.sendTransaction(tx);
 
-      await Promise.all([
-        Order.updateOne({ _id: reservedBuy._id }, { $set: { status: "PENDING", pendingTxHash: txHash } }),
-        Order.updateOne({ _id: reservedSell._id }, { $set: { status: "PENDING", pendingTxHash: txHash } }),
-      ]);
+      await this.ingestionService.ingest({
+        schemaVersion: 1,
+        eventId: `settlement-submitted:${txHash}`,
+        occurredAt: new Date().toISOString(),
+        eventType: "settlement-submitted",
+        orderOutPoints: [
+          { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
+          { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
+        ],
+        settlementTxHash: txHash,
+      } as BotEvent);
 
       return txHash;
     } catch (err) {
@@ -404,37 +425,91 @@ export default class DexOrderBot implements DexOrderBotTrait {
     return undefined;
   }
 
-  /** Sweeps expired RESERVED/PENDING orders: confirms, reverts to LIVE, or extends the reservation. */
+  /**
+   * Reconciles every in-flight RESERVED/PENDING order: confirms it, reverts it to LIVE, or
+   * leaves it be. A submitted settlement is checked for confirmation on every call regardless
+   * of `reservedUntil` - that field only bounds how long a *stuck* reservation (no tx ever
+   * submitted, or one that's neither committed nor rejected yet) is left in place before being
+   * given up on, and must never gate the confirmation check itself, or a trade that confirms in
+   * one block would still sit as PENDING until the full reservation TTL elapses.
+   */
   async retryFailSwaps(): Promise<void> {
-    const expired = await Order.find({
-      status: { $in: ["RESERVED", "PENDING"] },
-      reservedUntil: { $ne: null, $lte: new Date() },
-    });
+    const inFlight = await Order.find({ status: { $in: ["RESERVED", "PENDING"] } });
+    const expired = (order: OrderDoc) => Boolean(order.reservedUntil && order.reservedUntil <= new Date());
 
-    for (const order of expired) {
+    for (const order of inFlight) {
       if (!order.pendingTxHash) {
-        await this.revertToLive(order._id!);
+        if (expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
       const pendingTx = await this.client.getTransaction(order.pendingTxHash as Hex);
 
       if (pendingTx?.status === "committed") {
-        await this.markAsResolved(order._id!, "FILLED", order.pendingTxHash as Hex);
+        await this.confirmTrade(order, pendingTx);
         continue;
       }
 
       if (!pendingTx || pendingTx.status === "rejected") {
-        await this.revertToLive(order._id!);
+        if (expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
-      // Still pending in the mempool - give it more time before sweeping again.
-      await Order.updateOne(
-        { _id: order._id! },
-        { $set: { reservedUntil: new Date(Date.now() + RESERVATION_TTL_MS) } },
-      );
+      // Still pending in the mempool - only push the deadline out once it's actually due,
+      // rather than resetting a full fresh TTL on every poll regardless of how close it is.
+      if (expired(order)) {
+        await Order.updateOne(
+          { _id: order._id! },
+          { $set: { reservedUntil: new Date(Date.now() + RESERVATION_TTL_MS) } },
+        );
+      }
     }
+  }
+
+  /** Resolves both legs of a confirmed settlement as FILLED and records the trade. */
+  private async confirmTrade(order: OrderDoc, pendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>): Promise<void> {
+    const counterpart = await Order.findOne({
+      pendingTxHash: order.pendingTxHash,
+      _id: { $ne: order._id },
+    });
+    if (!counterpart) {
+      // The other leg isn't visible yet (e.g. a replica lag) - retry next tick.
+      return;
+    }
+
+    const buyOrder = order.direction === "BID" ? order : counterpart;
+    const sellOrder = order.direction === "BID" ? counterpart : order;
+    const txHash = order.pendingTxHash as Hex;
+
+    if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return;
+
+    await this.ingestionService.ingest({
+      schemaVersion: 1,
+      eventId: `trade-confirmed:${txHash}`,
+      occurredAt: new Date().toISOString(),
+      transactionHash: txHash,
+      blockNumber: pendingTx.blockNumber.toString(),
+      blockHash: pendingTx.blockHash,
+      eventType: "trade-confirmed",
+      buyOrderOutPoint: {
+        txHash: buyOrder.outPoint!.txHash as Hex,
+        index: buyOrder.outPoint!.index.toString(),
+      },
+      sellOrderOutPoint: {
+        txHash: sellOrder.outPoint!.txHash as Hex,
+        index: sellOrder.outPoint!.index.toString(),
+      },
+      trade: {
+        settlementTxHash: txHash,
+        buyerLockHash: buyOrder.ownerLockHash as Hex,
+        sellerLockHash: sellOrder.ownerLockHash as Hex,
+        xudtTypeHash: sellOrder.xudtTypeHash as Hex,
+        tokenAmount: sellOrder.remainingAmount.toString(),
+        price: sellOrder.pricePerToken.toString(),
+        paidCapacity: sellOrder.pricePerToken.toString(),
+        confirmedAtBlock: pendingTx.blockNumber.toString(),
+      },
+    } as BotEvent);
   }
 
   private async matchPendingOrders(): Promise<void> {
