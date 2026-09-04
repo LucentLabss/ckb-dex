@@ -98,7 +98,7 @@ router.get("/orders", async (req: Request, res: Response) => {
   const query = orderQuerySchema.parse(req.query);
   const filter: Record<string, string> = {};
 
-  if (query.makerLockHash) filter.makerLockHash = query.makerLockHash;
+  if (query.makerLockHash) filter.ownerLockHash = query.makerLockHash;
   if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
   if (query.direction) filter.direction = query.direction;
   if (query.status) filter.status = query.status;

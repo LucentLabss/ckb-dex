@@ -17,6 +17,7 @@ import OrderModel from "../models/order.js";
 import TradeModel from "../models/trade.js";
 import { HydratedDocument } from "mongoose";
 import type { OrderDocument } from "../models/order.js";
+import { RealtimeBroadcaster } from "./realtime.js";
 
 type IngestionResultStatus = "APPLIED" | "IGNORED";
 
@@ -91,6 +92,8 @@ async function updateOrderStatus(
 }
 
 export class EventIngestionService {
+  private readonly realtime = RealtimeBroadcaster.getInstance();
+
   public async ingest(event: BotEvent): Promise<IngestionResult> {
     const existing = await IngestionEventModel.findOne({ eventId: event.eventId }).lean();
     if (existing != undefined) {
@@ -189,6 +192,11 @@ export class EventIngestionService {
       },
     );
 
+    await Promise.all([
+      this.realtime.emitOrderbook(event.order.xudtTypeHash),
+      this.realtime.emitMakerOrders(event.order.ownerLockHash),
+    ]);
+
     return { status: "APPLIED", eventId: event.eventId };
   }
 
@@ -216,6 +224,11 @@ export class EventIngestionService {
     order.confirmedAtBlock = event.blockNumber;
     order.settlementTxHash = event.cancelledByTxHash;
     await order.save();
+
+    await Promise.all([
+      this.realtime.emitOrderbook(order.xudtTypeHash),
+      this.realtime.emitMakerOrders(order.ownerLockHash),
+    ]);
 
     return { status: "APPLIED", eventId: event.eventId };
   }
@@ -247,6 +260,11 @@ export class EventIngestionService {
       order.lastEventId = event.eventId;
       await order.save();
     }));
+
+    await Promise.all([
+      ...new Set(orders.map((order) => order.xudtTypeHash)),
+    ].map((xudtTypeHash) => this.realtime.emitOrderbook(xudtTypeHash)));
+    await Promise.all(orders.map((order) => this.realtime.emitMakerOrders(order.ownerLockHash)));
 
     return { status: "APPLIED", eventId: event.eventId };
   }
@@ -325,6 +343,12 @@ export class EventIngestionService {
         setDefaultsOnInsert: true,
       },
     );
+
+    await Promise.all([
+      this.realtime.emitOrderbook(event.trade.xudtTypeHash),
+      this.realtime.emitTrades(event.trade.xudtTypeHash),
+      ...orders.map((order) => this.realtime.emitMakerOrders(order.ownerLockHash)),
+    ]);
 
     return { status: "APPLIED", eventId: event.eventId };
   }
