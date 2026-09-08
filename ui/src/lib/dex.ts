@@ -65,6 +65,16 @@ export const SIDE_BUY = 0;
 export const SIDE_SELL = 1;
 export type OrderSide = typeof SIDE_BUY | typeof SIDE_SELL;
 
+// The settlement tx the bot builds has exactly two outputs - the seller's payout (which the
+// contract requires be paid in full, no fee deducted) and this buyer's token cell - so the
+// network fee can only come from unclaimed surplus on this order's own capacity. The bot
+// requires that surplus to cover tx.estimateFee(1_000n) (measured ~520 shannons for this
+// exact 2-in/2-out shape) plus its own 5_000n buffer (see DexOrderBot.executeTrade in
+// backend/src/bot/index.ts) - reserve well past that combined ~5_520n floor here too, since
+// this side can't compute the bot's estimate exactly ahead of matching. Exported so the UI
+// can disclose it to the trader before they submit a buy order.
+export const SETTLEMENT_FEE_RESERVE = 20_000n;
+
 export function buildDexLock(params: {
   side: OrderSide;
   makerLockHash: Hex;
@@ -156,15 +166,6 @@ export async function buildCreateOrderTx(params: {
     outputsData: [ccc.numLeToBytes(tokenAmount, 16)],
   });
   const buyerTokenCapacity = settlementScratchTx.outputs[0].capacity;
-
-  // The settlement tx the bot builds has exactly two outputs - the seller's payout (which the
-  // contract requires be paid in full, no fee deducted) and this buyer's token cell - so the
-  // network fee can only come from unclaimed surplus on this order's own capacity. The bot
-  // requires that surplus to cover tx.estimateFee(1_000n) (measured ~520 shannons for this
-  // exact 2-in/2-out shape) plus its own 5_000n buffer (see DexOrderBot.executeTrade in
-  // backend/src/bot/index.ts) - reserve well past that combined ~5_520n floor here too, since
-  // this side can't compute the bot's estimate exactly ahead of matching.
-  const SETTLEMENT_FEE_RESERVE = 20_000n;
 
   const tx = ccc.Transaction.from({
     outputs: [{ lock: dexLock, capacity: totalPrice + buyerTokenCapacity + SETTLEMENT_FEE_RESERVE }],
