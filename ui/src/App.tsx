@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Moon, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
   buildCreateOrderTx,
   DEX_NETWORK,
+  SETTLEMENT_FEE_RESERVE,
   SIDE_BUY,
   SIDE_SELL,
   systemScripts,
@@ -13,12 +14,28 @@ import {
   xudtTypeHash,
   type CancelableOrder,
 } from "./lib/dex";
+import { DepthChart } from "./components/DepthChart";
 import "./App.css";
 
 type Side = "buy" | "sell";
 type OrderType = "limit" | "market";
 type TabMode = "open" | "history";
-type OrderStatus = "Open" | "Pending" | "Filled" | "Cancelled";
+// The backend's real lifecycle (see backend/src/models/order.ts's OrderStatus) collapsed to
+// what's useful to show a trader. "Broadcasting" is local-only: the create/cancel tx was sent
+// but the bot hasn't indexed it yet, so the backend doesn't know about it at all.
+type OrderStatus = "Broadcasting" | "Open" | "Matched" | "Submitted" | "Filled" | "Cancelled" | "Invalid";
+
+const OPEN_STATUSES: ReadonlySet<OrderStatus> = new Set(["Broadcasting", "Open", "Matched", "Submitted"]);
+
+const STATUS_META: Record<OrderStatus, { label: string; hint: string }> = {
+  Broadcasting: { label: "Broadcasting", hint: "Transaction sent — waiting for the bot to pick it up" },
+  Open: { label: "Open", hint: "Resting in the order book, not yet matched" },
+  Matched: { label: "Matched", hint: "Paired with a counter-order — settlement is about to be submitted" },
+  Submitted: { label: "Submitted", hint: "Settlement transaction sent — waiting for on-chain confirmation" },
+  Filled: { label: "Filled", hint: "Trade confirmed on-chain" },
+  Cancelled: { label: "Cancelled", hint: "Order was cancelled" },
+  Invalid: { label: "Invalid", hint: "No longer valid (e.g. underfunded, or orphaned by a chain reorg)" },
+};
 
 type MarketRow = {
   price: number;
@@ -140,7 +157,19 @@ function App() {
   );
 }
 
+type Theme = "dark" | "light";
+
+function readStoredTheme(): Theme {
+  try {
+    const stored = window.localStorage.getItem("ckb-dex-theme");
+    return stored === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
 function WalletApp() {
+  const [theme, setTheme] = useState<Theme>(readStoredTheme);
   const [side, setSide] = useState<Side>("buy");
   const [orderType, setOrderType] = useState<OrderType>("limit");
   const [priceInput, setPriceInput] = useState(String(defaultMidPrice));
@@ -155,12 +184,22 @@ function WalletApp() {
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [loadingMarket, setLoadingMarket] = useState(false);
+  const [loadingMarket, setLoadingMarket] = useState(marketReady);
+  const [loadingMyOrders, setLoadingMyOrders] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [confirmOrder, setConfirmOrder] = useState<{
+    side: Side;
+    amount: number;
+    priceValue: number;
+    total: number;
+  } | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
-  const [marketAsks, setMarketAsks] = useState<MarketRow[]>(fixtureAsks);
-  const [marketBids, setMarketBids] = useState<MarketRow[]>(fixtureBids);
-  const [trades, setTrades] = useState<TradeEntry[]>(fixtureTrades);
+  // Fixture data is only ever shown in the no-market-configured demo mode (see
+  // `marketReady` below) - a real, configured market starts empty and stays that way
+  // until real data arrives, so "no orders yet" is never confused with demo content.
+  const [marketAsks, setMarketAsks] = useState<MarketRow[]>(marketReady ? [] : fixtureAsks);
+  const [marketBids, setMarketBids] = useState<MarketRow[]>(marketReady ? [] : fixtureBids);
+  const [trades, setTrades] = useState<TradeEntry[]>(marketReady ? [] : fixtureTrades);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [addressCopied, setAddressCopied] = useState(false);
   const [makerLockHash, setMakerLockHash] = useState<string | null>(null);
@@ -181,6 +220,19 @@ function WalletApp() {
   );
   const signer = useDevSigner ? devSigner : signerInfo?.signer;
   const connected = Boolean(signer && walletAddress);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      window.localStorage.setItem("ckb-dex-theme", theme);
+    } catch {
+      // localStorage unavailable (private browsing, etc.) - theme just won't persist
+    }
+  }, [theme]);
+
+  function toggleTheme() {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }
 
   useEffect(() => {
     makerLockHashRef.current = makerLockHash;
@@ -222,6 +274,15 @@ function WalletApp() {
     const timer = window.setTimeout(() => setToast(null), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!confirmOrder) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setConfirmOrder(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmOrder]);
 
   async function fetchWalletBalance(lock: ccc.Script) {
     try {
@@ -323,9 +384,11 @@ function WalletApp() {
     if (!makerLockHash) {
       setServerOrders([]);
       setPendingOrders([]);
+      setLoadingMyOrders(true);
       return;
     }
 
+    setLoadingMyOrders(true);
     wsSubscribe([`maker:${makerLockHash}:orders`]);
     void refreshMyOrders(makerLockHash);
   }, [makerLockHash]);
@@ -352,11 +415,11 @@ function WalletApp() {
   }, [serverOrders, pendingOrders]);
 
   const openOrders = useMemo(
-    () => mergedOrders.filter((order) => order.status === "Open" || order.status === "Pending"),
+    () => mergedOrders.filter((order) => OPEN_STATUSES.has(order.status)),
     [mergedOrders],
   );
   const history = useMemo(
-    () => mergedOrders.filter((order) => order.status === "Filled" || order.status === "Cancelled"),
+    () => mergedOrders.filter((order) => !OPEN_STATUSES.has(order.status)),
     [mergedOrders],
   );
 
@@ -386,6 +449,7 @@ function WalletApp() {
       setMarketAsks(mapped.asks);
       setMarketBids(mapped.bids);
       setApiError(null);
+      setLoadingMarket(false);
       return;
     }
 
@@ -401,6 +465,7 @@ function WalletApp() {
 
   function applyMyOrders(items: ApiOrderItem[]) {
     setServerOrders(items.map(mapApiOrder));
+    setLoadingMyOrders(false);
   }
 
   async function refreshMyOrders(lockHash: string) {
@@ -413,6 +478,8 @@ function WalletApp() {
       applyMyOrders(payload?.data?.items ?? []);
     } catch {
       // leave existing state - the realtime channel or next poll will catch up
+    } finally {
+      setLoadingMyOrders(false);
     }
   }
 
@@ -514,27 +581,26 @@ function WalletApp() {
       const orderBookPayload = await orderBookResponse.json();
       const tradePayload = tradeResponse.ok ? await tradeResponse.json() : null;
 
+      // Apply the fetched book/trades as-is, including a genuinely empty result - masking
+      // "no live orders yet" with fixture data made a real empty book indistinguishable
+      // from a loading or broken one (see the same fix already applied to the websocket path).
       const mappedBook = normalizeOrderBook(orderBookPayload?.data?.items ?? []);
-      setMarketAsks(mappedBook.asks.length > 0 ? mappedBook.asks : fixtureAsks);
-      setMarketBids(mappedBook.bids.length > 0 ? mappedBook.bids : fixtureBids);
-
-      if (tradePayload?.data?.items?.length) {
-        setTrades(normalizeTrades(tradePayload.data.items));
-      }
-
+      setMarketAsks(mappedBook.asks);
+      setMarketBids(mappedBook.bids);
+      setTrades(normalizeTrades(tradePayload?.data?.items ?? []));
       setApiError(null);
     } catch (error) {
-      const message = formatError(error, "Unable to reach the backend market service.");
-      setApiError(`${message} Showing local demo data instead.`);
-      setMarketAsks(fixtureAsks);
-      setMarketBids(fixtureBids);
-      setTrades(fixtureTrades);
+      // Leave whatever's currently on screen (real or empty) rather than overwriting it with
+      // fixture data - the banner above already explains the fetch failed.
+      setApiError(formatError(error, "Unable to reach the backend market service."));
     } finally {
       setLoadingMarket(false);
     }
   }
 
-  async function handleSubmit() {
+  /** Validates the form and opens the confirmation modal; the actual tx is built and sent
+   *  from `confirmSubmitOrder` once the user confirms. */
+  function handleSubmit() {
     if (!signer) {
       open();
       return;
@@ -563,27 +629,35 @@ function WalletApp() {
       return;
     }
 
+    setConfirmOrder({ side, amount, priceValue, total: priceValue * amount });
+  }
+
+  async function confirmSubmitOrder() {
+    const pending = confirmOrder;
+    if (!pending || !signer) return;
+    setConfirmOrder(null);
+
     setSubmitting(true);
     try {
-      const tokenAmount = BigInt(amount);
-      const totalPrice = ccc.fixedPointFrom((priceValue * amount).toFixed(8));
+      const tokenAmount = BigInt(pending.amount);
+      const totalPrice = ccc.fixedPointFrom((pending.priceValue * pending.amount).toFixed(8));
 
       const tx = await buildCreateOrderTx({
         signer,
         client,
-        side: side === "buy" ? SIDE_BUY : SIDE_SELL,
+        side: pending.side === "buy" ? SIDE_BUY : SIDE_SELL,
         tokenAmount,
         totalPrice,
       });
 
       const txHash = await signer.sendTransaction(tx);
-      showToast(`${side === "buy" ? "Buy" : "Sell"} order submitted — ${shortHash(txHash)}`);
+      showToast(`${pending.side === "buy" ? "Buy" : "Sell"} order submitted — ${shortHash(txHash)}`);
       setAmountInput("");
 
       const ownerLock = (await signer.getRecommendedAddressObj()).script;
       void fetchWalletBalance(ownerLock);
       setPendingOrders((previous) => [
-        buildOptimisticOrder({ txHash, side, tokenAmount, totalPrice, tx, ownerLock }),
+        buildOptimisticOrder({ txHash, side: pending.side, tokenAmount, totalPrice, tx, ownerLock }),
         ...previous,
       ]);
       if (makerLockHash) void refreshMyOrders(makerLockHash);
@@ -602,7 +676,7 @@ function WalletApp() {
       const txHash = await signer.sendTransaction(tx);
       showToast(`Cancel submitted — ${shortHash(txHash)}`);
       setPendingOrders((previous) => [
-        { ...order, status: "Cancelled" as OrderStatus, time: new Date() },
+        { ...order, status: "Broadcasting" as OrderStatus, time: new Date() },
         ...previous.filter((pending) => pending.id !== order.id),
       ]);
       if (makerLockHash) void refreshMyOrders(makerLockHash);
@@ -671,6 +745,15 @@ function WalletApp() {
         </div>
 
         <div className="header-right">
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-label="Toggle color theme"
+            onClick={toggleTheme}
+          >
+            {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
           <div id="headerBalance" className={connected ? "show" : ""}>
             <span>
               <b className="mono">{fmtAmount(walletBalance.TOKEN)}</b> TOKEN
@@ -734,6 +817,10 @@ function WalletApp() {
             ) : null}
           </div>
           <div className="panel-body">
+            {askRows.length > 0 || bidRows.length > 0 ? (
+              <DepthChart bids={bidRows} asks={askRows} midPrice={midPrice} />
+            ) : null}
+
             <div className="book-cols">
               <span>Price (CKB)</span>
               <span>Amount (TOKEN)</span>
@@ -741,26 +828,32 @@ function WalletApp() {
             </div>
 
             <div id="asksBody">
-              {askRows.map((row) => (
-                <button
-                  key={`${row.price}-${row.amount}`}
-                  type="button"
-                  className="book-row ask"
-                  onClick={() => {
-                    setOrderTypeValue("limit");
-                    setOrderSide("buy");
-                    setPriceInput(row.price.toFixed(6));
-                  }}
-                >
-                  <div
-                    className="depth-bar"
-                    style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
-                  />
-                  <span className="mono red">{fmtPrice(row.price)}</span>
-                  <span className="mono">{fmtAmount(row.amount)}</span>
-                  <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
-                </button>
-              ))}
+              {loadingMarket && askRows.length === 0 ? (
+                <BookRowSkeleton rows={3} />
+              ) : askRows.length === 0 ? (
+                <p className="book-empty">No live sell orders</p>
+              ) : (
+                askRows.map((row) => (
+                  <button
+                    key={`${row.price}-${row.amount}`}
+                    type="button"
+                    className="book-row ask"
+                    onClick={() => {
+                      setOrderTypeValue("limit");
+                      setOrderSide("buy");
+                      setPriceInput(row.price.toFixed(6));
+                    }}
+                  >
+                    <div
+                      className="depth-bar"
+                      style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
+                    />
+                    <span className="mono red">{fmtPrice(row.price)}</span>
+                    <span className="mono">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
+                  </button>
+                ))
+              )}
             </div>
 
             <div className="spread-row">
@@ -771,26 +864,32 @@ function WalletApp() {
             </div>
 
             <div id="bidsBody">
-              {bidRows.map((row) => (
-                <button
-                  key={`${row.price}-${row.amount}`}
-                  type="button"
-                  className="book-row bid"
-                  onClick={() => {
-                    setOrderTypeValue("limit");
-                    setOrderSide("sell");
-                    setPriceInput(row.price.toFixed(6));
-                  }}
-                >
-                  <div
-                    className="depth-bar"
-                    style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
-                  />
-                  <span className="mono green">{fmtPrice(row.price)}</span>
-                  <span className="mono">{fmtAmount(row.amount)}</span>
-                  <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
-                </button>
-              ))}
+              {loadingMarket && bidRows.length === 0 ? (
+                <BookRowSkeleton rows={3} />
+              ) : bidRows.length === 0 ? (
+                <p className="book-empty">No live buy orders</p>
+              ) : (
+                bidRows.map((row) => (
+                  <button
+                    key={`${row.price}-${row.amount}`}
+                    type="button"
+                    className="book-row bid"
+                    onClick={() => {
+                      setOrderTypeValue("limit");
+                      setOrderSide("sell");
+                      setPriceInput(row.price.toFixed(6));
+                    }}
+                  >
+                    <div
+                      className="depth-bar"
+                      style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
+                    />
+                    <span className="mono green">{fmtPrice(row.price)}</span>
+                    <span className="mono">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -885,7 +984,7 @@ function WalletApp() {
               type="button"
               className={`submit-btn ${connected ? side : "neutral"}`}
               disabled={submitting}
-              onClick={() => void handleSubmit()}
+              onClick={handleSubmit}
             >
               {submitLabel}
             </button>
@@ -917,7 +1016,12 @@ function WalletApp() {
 
             <div className="trade-list">
               <div className="trade-list-header">Recent trades</div>
-              {trades.map((trade) => (
+              {loadingMarket && trades.length === 0 ? (
+                <TradeRowSkeleton rows={3} />
+              ) : trades.length === 0 ? (
+                <p className="book-empty">No trades yet</p>
+              ) : (
+                trades.map((trade) => (
                 <div key={`${trade.hash}-${trade.time}`} className="trade-row">
                   <span className={`trade-side ${trade.side}`}>
                     {trade.side === "buy" ? "Buy" : "Sell"}
@@ -926,7 +1030,8 @@ function WalletApp() {
                   <span className="mono muted">{trade.amount}</span>
                   <span className="muted">{trade.time}</span>
                 </div>
-              ))}
+                ))
+              )}
             </div>
 
             <div className="divider" />
@@ -979,6 +1084,7 @@ function WalletApp() {
                     <th>Price</th>
                     <th>Amount</th>
                     <th>Total</th>
+                    <th>Status</th>
                     <th>Time</th>
                     <th></th>
                   </tr>
@@ -986,11 +1092,13 @@ function WalletApp() {
                 <tbody>
                   {!connected ? (
                     <tr className="empty-row">
-                      <td colSpan={8}>Connect your wallet to see your open orders</td>
+                      <td colSpan={9}>Connect your wallet to see your open orders</td>
                     </tr>
+                  ) : loadingMyOrders && openOrders.length === 0 ? (
+                    <OrderRowSkeleton columns={9} rows={2} />
                   ) : openOrders.length === 0 ? (
                     <tr className="empty-row">
-                      <td colSpan={8}>No open orders</td>
+                      <td colSpan={9}>No open orders — place a buy or sell order to get started</td>
                     </tr>
                   ) : (
                     openOrders.map((order) => (
@@ -1005,14 +1113,10 @@ function WalletApp() {
                         <td className="mono">{fmtPrice(order.price)}</td>
                         <td className="mono">{fmtAmount(order.amount)}</td>
                         <td className="mono">{fmtCkb(order.total)}</td>
-                        <td className="muted">
-                          {fmtTime(order.time)}
-                          {order.status === "Pending" ? (
-                            <span className="pending-tag" title="Submitted on-chain, waiting for the backend to index it">
-                              Pending
-                            </span>
-                          ) : null}
+                        <td>
+                          <StatusBadge status={order.status} />
                         </td>
+                        <td className="muted">{fmtTime(order.time)}</td>
                         <td>
                           <button
                             type="button"
@@ -1048,6 +1152,8 @@ function WalletApp() {
                     <tr className="empty-row">
                       <td colSpan={8}>Connect your wallet to see your order history</td>
                     </tr>
+                  ) : loadingMyOrders && history.length === 0 ? (
+                    <OrderRowSkeleton columns={8} rows={2} />
                   ) : history.length === 0 ? (
                     <tr className="empty-row">
                       <td colSpan={8}>No order history yet</td>
@@ -1066,7 +1172,7 @@ function WalletApp() {
                         <td className="mono">{fmtAmount(order.amount)}</td>
                         <td className="mono">{fmtCkb(order.total)}</td>
                         <td>
-                          <span className={`status-tag ${order.status}`}>{order.status}</span>
+                          <StatusBadge status={order.status} />
                         </td>
                         <td className="muted">{fmtTime(order.time)}</td>
                       </tr>
@@ -1079,15 +1185,148 @@ function WalletApp() {
         </div>
       </div>
 
+      {confirmOrder ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setConfirmOrder(null)}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirmOrderTitle"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div id="confirmOrderTitle" className="modal-title">
+              Confirm {confirmOrder.side === "buy" ? "buy" : "sell"} order
+            </div>
+            <div className="modal-rows">
+              <div className="modal-row">
+                <span className="secondary">Pair</span>
+                <span className="mono">{tradingPairLabel}</span>
+              </div>
+              <div className="modal-row">
+                <span className="secondary">Side</span>
+                <span className={confirmOrder.side === "buy" ? "green" : "red"}>
+                  {confirmOrder.side === "buy" ? "Buy" : "Sell"}
+                </span>
+              </div>
+              <div className="modal-row">
+                <span className="secondary">Price</span>
+                <span className="mono">{fmtPrice(confirmOrder.priceValue)} CKB</span>
+              </div>
+              <div className="modal-row">
+                <span className="secondary">Amount</span>
+                <span className="mono">{fmtAmount(confirmOrder.amount)} TOKEN</span>
+              </div>
+              <div className="modal-row modal-row-total">
+                <span className="secondary">Total</span>
+                <span className="mono">{fmtCkb(confirmOrder.total)} CKB</span>
+              </div>
+            </div>
+            {confirmOrder.side === "buy" ? (
+              <p className="modal-note">
+                A small network fee reserve ({ccc.fixedPointToString(SETTLEMENT_FEE_RESERVE)} CKB)
+                is added on top of the total so the bot can settle the trade once it's matched.
+              </p>
+            ) : null}
+            <div className="modal-actions">
+              <button type="button" className="modal-btn-secondary" onClick={() => setConfirmOrder(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={`modal-btn-primary ${confirmOrder.side}`}
+                onClick={() => void confirmSubmitOrder()}
+              >
+                Confirm {confirmOrder.side === "buy" ? "buy" : "sell"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div id="toastHost">{toast ? <div className="toast">{toast}</div> : null}</div>
     </div>
   );
 }
 
+function StatusBadge({ status }: { status: OrderStatus }) {
+  const meta = STATUS_META[status];
+  return (
+    <span className={`status-tag status-${status}`} title={meta.hint}>
+      {meta.label}
+    </span>
+  );
+}
+
+function BookRowSkeleton({ rows }: { rows: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="book-row skeleton-row" aria-hidden="true">
+          <span className="skeleton-block" />
+          <span className="skeleton-block" style={{ marginLeft: "auto" }} />
+          <span className="skeleton-block" style={{ marginLeft: "auto" }} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+function TradeRowSkeleton({ rows }: { rows: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="trade-row skeleton-row" aria-hidden="true">
+          <span className="skeleton-block" />
+          <span className="skeleton-block" />
+          <span className="skeleton-block" />
+          <span className="skeleton-block" />
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** Placeholder rows shown while the first fetch for a table is still in flight. */
+function OrderRowSkeleton({ columns, rows }: { columns: number; rows: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, rowIndex) => (
+        <tr key={rowIndex} className="skeleton-row" aria-hidden="true">
+          {Array.from({ length: columns }, (_, colIndex) => (
+            <td key={colIndex}>
+              <span className="skeleton-block" />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
 function mapOrderStatus(status?: string): OrderStatus {
-  if (status === "FILLED") return "Filled";
-  if (status === "CANCELED" || status === "CANCELLED") return "Cancelled";
-  return "Open";
+  switch (status) {
+    case "FILLED":
+      return "Filled";
+    case "CANCELED":
+    case "CANCELLED":
+      return "Cancelled";
+    case "RESERVED":
+      return "Matched";
+    case "PENDING":
+    case "SETTLEMENT_SUBMITTED":
+      return "Submitted";
+    case "INVALID":
+    case "ORPHANED":
+      return "Invalid";
+    default:
+      // LIVE, DISCOVERED, or anything the backend adds later that we don't
+      // specifically distinguish yet - still a resting, unmatched order.
+      return "Open";
+  }
 }
 
 function shannonsToCkb(value: string | undefined): number {
@@ -1130,7 +1369,7 @@ function buildOptimisticOrder(params: {
     amount,
     total: totalCkb,
     time: new Date(),
-    status: "Pending",
+    status: "Broadcasting",
     raw: {
       outPoint: { txHash, index: "0" } as CancelableOrder["outPoint"],
       direction,
