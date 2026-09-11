@@ -13,13 +13,10 @@ import systemScriptsJson from "../../../deployment/system-scripts.json" with { t
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
 /**
- * dex-order-lock args layout (see smart-contract/contracts/dex-order-lock/src/main.rs):
- *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE) = 90 bytes.
- * `side` is BUY(0)/SELL(1) on the wire - unrelated to, and not interchangeable with,
- * the OrderType enum in ../types. As before, the full owner lock script is not embedded
- * on-chain - it is recovered from the inputs of the transaction that created the order
- * cell (see resolveOwnerLock/findInputWithLockHash), since the dex-lock script never
- * runs at cell creation and the maker hash in args is otherwise unauthenticated.
+ * dex-order-lock args (see smart-contract/contracts/dex-order-lock/src/main.rs):
+ *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE)
+ * The owner lock isn't embedded on-chain - it's recovered from the creating tx's inputs
+ * (see findInputWithLockHash), since the lock script never runs at cell creation.
  */
 const ORDER_VERSION = 1;
 const SIDE_BUY = 0;
@@ -104,9 +101,57 @@ function resolveDexCellDeps(dexOrderLockScript: Script): ccc.CellDepLike[] {
   );
 }
 
-function resolveXudtCellDeps(): ccc.CellDepLike[] {
-  const xudt = (systemScriptsJson as Record<string, DeploymentScriptEntry>).XUdt;
-  return xudt.cellDeps.map(({ cellDep }) => cellDep);
+// `offckb system-scripts --export-style ccc` shape: nested by network, each script keyed
+// by its own snake_case name under a `.script` sub-object.
+interface OffckbScriptEntry {
+  name: string;
+  script: DeploymentScriptEntry;
+}
+
+// Maps offckb's snake_case script names to ccc's KnownScript names.
+const KNOWN_SCRIPT_NAME_MAP: Record<string, ccc.KnownScript> = {
+  secp256k1_blake160_sighash_all: ccc.KnownScript.Secp256k1Blake160,
+  secp256k1_blake160_multisig_all: ccc.KnownScript.Secp256k1Multisig,
+  dao: ccc.KnownScript.NervosDao,
+  sudt: ccc.KnownScript.SUdt,
+  xudt: ccc.KnownScript.XUdt,
+  omnilock: ccc.KnownScript.OmniLock,
+  anyone_can_pay: ccc.KnownScript.AnyoneCanPay,
+  nostr_lock: ccc.KnownScript.NostrLock,
+  type_id: ccc.KnownScript.TypeId,
+};
+
+/** Reads deployment/system-scripts.json's bucket for `network`, translated for ccc's client. */
+function resolveNetworkScripts(network: string): {
+  known: Record<string, ccc.ScriptInfoLike>;
+  raw: Record<string, OffckbScriptEntry>;
+} {
+  const raw = (systemScriptsJson as Record<string, Record<string, OffckbScriptEntry> | undefined>)[
+    network
+  ];
+  if (!raw) {
+    throw new AppError(500, `No system-scripts entries for network "${network}"`);
+  }
+
+  const known: Record<string, ccc.ScriptInfoLike> = {};
+  for (const [snakeName, entry] of Object.entries(raw)) {
+    const knownName = KNOWN_SCRIPT_NAME_MAP[snakeName];
+    if (!knownName) continue;
+    known[knownName] = {
+      codeHash: entry.script.codeHash,
+      hashType: entry.script.hashType,
+      cellDeps: entry.script.cellDeps,
+    };
+  }
+  return { known, raw };
+}
+
+function resolveXudtCellDeps(raw: Record<string, OffckbScriptEntry>, network: string): ccc.CellDepLike[] {
+  const xudt = raw.xudt;
+  if (!xudt) {
+    throw new AppError(500, `No "xudt" system-script entry for network "${network}"`);
+  }
+  return xudt.script.cellDeps.map(({ cellDep }) => cellDep);
 }
 
 interface DexOrderBotTrait {
@@ -149,21 +194,18 @@ export default class DexOrderBot implements DexOrderBotTrait {
     this.config = config;
     this.pollInterval = pollInterval;
 
+    const { known, raw } = resolveNetworkScripts(config.ckbNetwork);
+
     this.client = new ccc.ClientPublicTestnet({
       url: config.ckbRpcUrl,
-      scripts: systemScriptsJson as unknown as Record<
-        ccc.KnownScript,
-        ccc.ScriptInfoLike | undefined
-      >,
-      // Without this, ClientPublicTestnet defaults to public testnet.ckb.dev/ckbapp.dev
-      // fallbacks - so any hiccup talking to the local devnet node silently redirects the
-      // bot at a real public network instead of failing fast (see ui/src/App.tsx's ckbClient,
-      // which already sets this for the same reason).
+      scripts: known as unknown as Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined>,
+      // Without this, ClientPublicTestnet falls back to public testnet.ckb.dev/ckbapp.dev
+      // on any RPC hiccup instead of failing fast.
       fallbacks: [],
     });
 
     this.dexCellDeps = resolveDexCellDeps(config.dexOrderLockScript);
-    this.xudtCellDeps = resolveXudtCellDeps();
+    this.xudtCellDeps = resolveXudtCellDeps(raw, config.ckbNetwork);
   }
 
   get pendingPairOrders(): OrderDoc[] {
@@ -246,9 +288,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const discovered: OrderDoc[] = [];
 
-    // `findCells`'s public type omits `blockRange`, even though it's forwarded to the
-    // indexer at runtime (see ClientIndexerSearchKeyFilterLike) - type via the wider key
-    // first so this isn't flagged as an excess property on the literal.
+    // `findCells`'s public type omits `blockRange`, though it's forwarded to the indexer -
+    // type via the wider key so it isn't flagged as an excess property on the literal.
     const searchKey: ccc.ClientIndexerSearchKeyLike = {
       script: dexLockTemplate,
       scriptType: "lock",
@@ -293,11 +334,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /**
-   * Builds and submits the settlement transaction that crosses one BUY order against one
-   * SELL order sharing the same token/amount/price - exactly what the dex-order-lock
-   * contract's match path validates (see smart-contract main.rs / tests.rs). No signer is
-   * needed: the lock script has no signature check, only structural rules, and the BUY
-   * order is expected to be pre-funded to cover price + its own settlement output + fee.
+   * Builds and submits the settlement tx crossing one BUY against one matching SELL order.
+   * No signer needed - the lock script has no signature check, only structural rules.
    */
   async executeTrade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex> {
     if (buyOrder.direction !== "BID" || sellOrder.direction !== "ASK") {
@@ -338,14 +376,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
       outputsData: ["0x", sellOrder.cellData as Hex],
     });
 
-    // The seller's output must be at least capacity + price with no tolerance (the contract's
-    // validate_sell_order rejects anything less as ERROR_SELLER_UNDERPAID) - the fee can't come
-    // out of this side. It has to be unclaimed surplus on the buyer's input instead: CKB treats
-    // any gap between total inputs and total outputs as the fee automatically, so the buy order
-    // must have been funded with a little more than price + its token cell's minimal capacity.
-    // The tx carries no witnesses (this lock has no signature check), but the node still sizes
-    // the fee against the witness placeholders it expects per input group - pad the estimate
-    // rather than replicate that accounting exactly; a few thousand extra shannons is immaterial.
+    // The seller must be paid capacity + price exactly (validate_sell_order rejects less),
+    // so the fee can only come from surplus on the buy order's own capacity.
     const buyerTokenCapacity = tx.outputs[1].capacity;
     const fee = tx.estimateFee(SETTLEMENT_FEE_RATE) + 5_000n;
     const buyCapacity = BigInt(buyOrder.capacity);
@@ -427,11 +459,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
   /**
    * Reconciles every in-flight RESERVED/PENDING order: confirms it, reverts it to LIVE, or
-   * leaves it be. A submitted settlement is checked for confirmation on every call regardless
-   * of `reservedUntil` - that field only bounds how long a *stuck* reservation (no tx ever
-   * submitted, or one that's neither committed nor rejected yet) is left in place before being
-   * given up on, and must never gate the confirmation check itself, or a trade that confirms in
-   * one block would still sit as PENDING until the full reservation TTL elapses.
+   * leaves it be. Confirmation is checked every call regardless of `reservedUntil` - that
+   * field only bounds how long a stuck reservation is kept before giving up on it.
    */
   async retryFailSwaps(): Promise<void> {
     const inFlight = await Order.find({ status: { $in: ["RESERVED", "PENDING"] } });
@@ -587,10 +616,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       return undefined;
     }
 
-    // The dex-order-lock script never runs at cell creation (only when spent), so the
-    // makerLockHash in args is unauthenticated on its own. We recover - and trust - the
-    // real owner lock only if it appears among the creating transaction's own inputs,
-    // since spending an input requires a valid signature from its owner.
+    // Trust the owner lock only if it appears among the creating tx's own inputs.
     const ownerLock = await this.findInputWithLockHash(
       creatingTx.transaction,
       decoded.makerLockHash,
@@ -669,11 +695,26 @@ export default class DexOrderBot implements DexOrderBotTrait {
       order.ownerLockHash as Hex,
     );
 
-    await this.markAsResolved(
-      order._id!,
-      cancellationInput ? "CANCELED" : "FILLED",
-      spendingTxHash,
-    );
+    if (!cancellationInput) {
+      await this.markAsResolved(order._id!, "FILLED", spendingTxHash);
+      return;
+    }
+
+    // Route through the same ingestion pipeline order-confirmed/trade-confirmed already
+    // use, rather than writing the status directly - that's what actually pushes the WS
+    // update (emitMakerOrders/emitOrderbook), not just the DB write.
+    if (spendingTx.blockNumber === undefined || !spendingTx.blockHash) return;
+    await this.ingestionService.ingest({
+      schemaVersion: 1,
+      eventId: `order-cancelled:${spendingTxHash}:${order._id}`,
+      occurredAt: new Date().toISOString(),
+      transactionHash: spendingTxHash,
+      blockNumber: spendingTx.blockNumber.toString(),
+      blockHash: spendingTx.blockHash,
+      eventType: "order-cancelled",
+      outPoint: { txHash: order.outPoint!.txHash as Hex, index: order.outPoint!.index.toString() },
+      cancelledByTxHash: spendingTxHash,
+    } as BotEvent);
   }
 
   private async revertToLive(orderId: string): Promise<void> {

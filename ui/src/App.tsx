@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
-import { Check, Copy, Moon, Sun } from "lucide-react";
+import { Check, Copy, Moon, RefreshCw, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
   buildCreateOrderTx,
@@ -120,6 +120,9 @@ const fixtureTrades: TradeEntry[] = [
 
 const defaultMidPrice = 0.00814;
 const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:3000/api/v1";
+// The faucet is a separate small service (see faucet/) - unset by default so it never
+// shows up unless explicitly configured, and never on mainnet regardless.
+const faucetUrl = import.meta.env.VITE_FAUCET_URL as string | undefined;
 const wsBase =
   (import.meta.env.VITE_WS_URL as string | undefined) ??
   apiBase.replace(/^http/, "ws").replace(/\/api\/v\d+\/?$/, "");
@@ -143,9 +146,9 @@ const ckbClient = new ccc.ClientPublicTestnet({
 // Dev-only escape hatch: JoyID (and most hosted/extension wallets) can't represent a local
 // devnet identity - they're tied to real testnet/mainnet. This lets local devnet testing use
 // a plain private key (e.g. offchain/.env's MAKER_PRIVATE_KEY, which already holds devnet CKB
-// and demo tokens) instead. Never exposed outside dev builds - a raw key in the browser is
-// only acceptable for throwaway devnet funds.
-const devPrivateKey = import.meta.env.DEV
+// and demo tokens) instead. Only acceptable for throwaway devnet funds, so gated on both a
+// dev build AND devnet - never exposed against testnet or mainnet, even from `vite dev`.
+const devPrivateKey = import.meta.env.DEV && DEX_NETWORK === "devnet"
   ? (import.meta.env.VITE_DEV_PRIVATE_KEY as string | undefined)
   : undefined;
 
@@ -187,6 +190,7 @@ function WalletApp() {
   const [loadingMarket, setLoadingMarket] = useState(marketReady);
   const [loadingMyOrders, setLoadingMyOrders] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
   const [confirmOrder, setConfirmOrder] = useState<{
     side: Side;
     amount: number;
@@ -207,6 +211,8 @@ function WalletApp() {
     CKB: 0,
     TOKEN: 0,
   });
+  const [faucetLoading, setFaucetLoading] = useState(false);
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsChannelsRef = useRef<Set<string>>(new Set());
@@ -256,8 +262,10 @@ function WalletApp() {
         setMakerLockHash(address.script.hash());
         void fetchWalletBalance(address.script);
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return;
+        console.error("Failed to resolve a CKB address for the connected signer:", error);
+        showToast(formatError(error, "Couldn't resolve a CKB address for this wallet"));
         setWalletAddress(null);
         setMakerLockHash(null);
         setWalletBalance({ CKB: 0, TOKEN: 0 });
@@ -301,6 +309,47 @@ function WalletApp() {
       });
     } catch {
       setWalletBalance({ CKB: 0, TOKEN: 0 });
+    }
+  }
+
+  // Manual escape hatch: the WS/event pipeline is usually fast, but a bot poll cycle or a
+  // dropped WS message can still leave the shown balance stale for a bit - this always
+  // re-queries the chain directly, no matter what the event pipeline is doing.
+  async function refreshWalletBalance() {
+    if (!signer || refreshingBalance) return;
+    setRefreshingBalance(true);
+    try {
+      const address = await signer.getRecommendedAddressObj();
+      await fetchWalletBalance(address.script);
+    } finally {
+      setRefreshingBalance(false);
+    }
+  }
+
+  async function claimFaucetTokens() {
+    if (!faucetUrl || !signer || !walletAddress) return;
+
+    setFaucetLoading(true);
+    try {
+      const response = await fetch(`${faucetUrl}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: walletAddress }),
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        showToast(body?.message ?? "Faucet claim failed");
+        return;
+      }
+
+      showToast(`Faucet sent ${body?.data?.amount ?? "test"} TOKEN — ${shortHash(body?.data?.txHash ?? "")}`);
+      const address = await signer.getRecommendedAddressObj();
+      void fetchWalletBalance(address.script);
+    } catch (error) {
+      showToast(formatError(error, "Faucet claim failed"));
+    } finally {
+      setFaucetLoading(false);
     }
   }
 
@@ -393,15 +442,13 @@ function WalletApp() {
     void refreshMyOrders(makerLockHash);
   }, [makerLockHash]);
 
-  // Local orders (just placed/cancelled) are kept until the backend reports the same
-  // status for the same id - at which point the backend's version is authoritative and
-  // the local placeholder is no longer needed.
+  // Local orders (just placed/cancelled) are kept until the backend reports anything at
+  // all for the same id - at which point the backend's version is authoritative and the
+  // local placeholder is no longer needed. Note this can never be "the same status": the
+  // placeholder's status is the local-only "Broadcasting", which the backend never reports.
   useEffect(() => {
     setPendingOrders((previous) =>
-      previous.filter((pending) => {
-        const fromServer = serverOrders.find((order) => order.id === pending.id);
-        return !(fromServer && fromServer.status === pending.status);
-      }),
+      previous.filter((pending) => !serverOrders.some((order) => order.id === pending.id)),
     );
   }, [serverOrders]);
 
@@ -466,6 +513,12 @@ function WalletApp() {
   function applyMyOrders(items: ApiOrderItem[]) {
     setServerOrders(items.map(mapApiOrder));
     setLoadingMyOrders(false);
+    // Any push here means something about this maker's orders just changed (filled,
+    // cancelled, matched) - exactly when the on-chain balance would have moved too, unlike
+    // the one-shot fetch right after submitting, which fires before that's actually true.
+    if (signer) {
+      void signer.getRecommendedAddressObj().then((address) => fetchWalletBalance(address.script));
+    }
   }
 
   async function refreshMyOrders(lockHash: string) {
@@ -669,8 +722,9 @@ function WalletApp() {
   }
 
   async function handleCancelOrder(order: Order) {
-    if (!signer || !order.raw) return;
+    if (!signer || !order.raw || cancellingIds.has(order.id)) return;
 
+    setCancellingIds((previous) => new Set(previous).add(order.id));
     try {
       const tx = await buildCancelOrderTx({ signer, client, order: order.raw });
       const txHash = await signer.sendTransaction(tx);
@@ -682,6 +736,12 @@ function WalletApp() {
       if (makerLockHash) void refreshMyOrders(makerLockHash);
     } catch (error) {
       showToast(formatError(error, "Cancel failed"));
+    } finally {
+      setCancellingIds((previous) => {
+        const next = new Set(previous);
+        next.delete(order.id);
+        return next;
+      });
     }
   }
 
@@ -761,6 +821,16 @@ function WalletApp() {
             <span>
               <b className="mono">{fmtCkb(walletBalance.CKB)}</b> CKB
             </span>
+            <button
+              type="button"
+              className="refresh-balance-btn"
+              title="Refresh balance"
+              aria-label="Refresh balance"
+              disabled={refreshingBalance}
+              onClick={() => void refreshWalletBalance()}
+            >
+              <RefreshCw size={13} className={refreshingBalance ? "spin" : ""} />
+            </button>
           </div>
           <div className="wallet-controls">
             <button
@@ -1035,7 +1105,21 @@ function WalletApp() {
             </div>
 
             <div className="divider" />
-            <div className="panel-header small-header">Balances</div>
+            <div className="panel-header small-header">
+              Balances
+              {connected ? (
+                <button
+                  type="button"
+                  className="refresh-balance-btn"
+                  title="Refresh balance"
+                  aria-label="Refresh balance"
+                  disabled={refreshingBalance}
+                  onClick={() => void refreshWalletBalance()}
+                >
+                  <RefreshCw size={13} className={refreshingBalance ? "spin" : ""} />
+                </button>
+              ) : null}
+            </div>
             <div id="balancesContent">
               {connected ? (
                 <>
@@ -1047,6 +1131,16 @@ function WalletApp() {
                     <span className="secondary">CKB</span>
                     <span className="mono amt">{fmtCkb(walletBalance.CKB)}</span>
                   </div>
+                  {faucetUrl && DEX_NETWORK !== "mainnet" ? (
+                    <button
+                      type="button"
+                      className="dev-signer-btn faucet-btn"
+                      disabled={faucetLoading}
+                      onClick={() => void claimFaucetTokens()}
+                    >
+                      {faucetLoading ? "Requesting…" : "Get test TOKEN"}
+                    </button>
+                  ) : null}
                 </>
               ) : (
                 <p className="muted">Connect your wallet to view balances.</p>
@@ -1121,9 +1215,10 @@ function WalletApp() {
                           <button
                             type="button"
                             className="cancel-btn"
+                            disabled={cancellingIds.has(order.id)}
                             onClick={() => void handleCancelOrder(order)}
                           >
-                            Cancel
+                            {cancellingIds.has(order.id) ? "Cancelling…" : "Cancel"}
                           </button>
                         </td>
                       </tr>

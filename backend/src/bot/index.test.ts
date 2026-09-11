@@ -10,6 +10,7 @@ import DexOrderBot, { OrderDoc } from "./index.js";
 const config: Config = {
   mongodbUrl: "mongodb://127.0.0.1:27017/test",
   ckbRpcUrl: "http://127.0.0.1:8114",
+  ckbNetwork: "devnet",
   enviroment: "development",
   dexOrderLockScript: {
     codeHash: "0xcf8604433cfbd424e8fd32f0c59aca23ab09e528eb3e3281519ad6451f636b51",
