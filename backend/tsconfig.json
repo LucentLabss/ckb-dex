@@ -10,8 +10,9 @@
     "skipLibCheck": true,
     "allowJs": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": "src"
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/bot/index.ts"]
+  "include": ["src/**/*.ts"]
 }

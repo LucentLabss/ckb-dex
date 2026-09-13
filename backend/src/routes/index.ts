@@ -1,6 +1,6 @@
 // Defines the legacy root API router and its basic welcome response.
 import { Router, Request, Response } from "express";
-import { sendSuccess } from "../utils";
+import { sendSuccess } from "../utils/index.js";
 
 const router = Router();
 

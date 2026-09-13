@@ -3,11 +3,11 @@ import bodyParser from "body-parser";
 import express, { Request, Response } from "express";
 import helmet from "helmet";
 import cors from "cors";
-import { Config } from "./types";
-import { sendSuccess } from "./utils";
+import { Config } from "./types/index.js";
+import { sendSuccess } from "./utils/index.js";
 import marketRouter from "./routes/market.js";
-import internalRouter from "./routes/internal";
-import { createInternalBotAuthMiddleware, errorHandler, requestContextMiddleware } from "./middleware";
+import internalRouter from "./routes/internal.js";
+import { createInternalBotAuthMiddleware, errorHandler, requestContextMiddleware } from "./middleware/index.js";
 import { RealtimeBroadcaster } from "./services/realtime.js";
 
 interface CreateExpressServerOptions {

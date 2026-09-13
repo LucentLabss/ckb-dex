@@ -2,8 +2,8 @@
 import { NextFunction, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import AppError from "../services/error.js";
-import { sendError } from "../utils";
-import { Config } from "../types";
+import { sendError } from "../utils/index.js";
+import { Config } from "../types/index.js";
 
 export function requestContextMiddleware(
 	req: Request,

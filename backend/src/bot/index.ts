@@ -2,7 +2,7 @@
 import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
-import { Config, Hex, Script } from "../types";
+import { Config, Hex, Script } from "../types/index.js";
 import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
 import { EventIngestionService } from "../services/event-ingestion.js";

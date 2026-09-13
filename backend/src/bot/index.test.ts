@@ -2,7 +2,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
-import type { Config } from "../types";
+import type { Config } from "../types/index.js";
 import DexOrderBot, { OrderDoc } from "./index.js";
 
 // Must match the "dex-order-lock" entry in deployment/scripts.json so the bot's

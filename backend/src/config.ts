@@ -1,6 +1,6 @@
 // Loads, validates, and supplies runtime configuration for the backend service.
 import AppError from "./services/error.js";
-import { Config, AppConfig, NODE_ENV, Hex, HashType, CkbNetwork } from "./types";
+import { Config, AppConfig, NODE_ENV, Hex, HashType, CkbNetwork } from "./types/index.js";
 import * as dotenv from "dotenv";
 
 dotenv.config();
