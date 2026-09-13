@@ -1,11 +1,12 @@
 // Loads, validates, and supplies runtime configuration for the backend service.
 import AppError from "./services/error.js";
-import { Config, AppConfig, NODE_ENV, Hex, HashType } from "./types";
+import { Config, AppConfig, NODE_ENV, Hex, HashType, CkbNetwork } from "./types/index.js";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
 const VALID_HASH_TYPES: HashType[] = ["data", "type", "data1", "data2"];
+const VALID_CKB_NETWORKS: CkbNetwork[] = ["devnet", "testnet", "mainnet"];
 const DEFAULT_CONFIG = {
     mongodbUrl: "mongodb://127.0.0.1:27017/ckb-dex",
     ckbRpcUrl: "http://127.0.0.1:8114",
@@ -70,6 +71,18 @@ function parseHashType(name: string, value: string | undefined): HashType {
     return parsedValue as HashType;
 }
 
+function parseCkbNetwork(value: string | undefined): CkbNetwork {
+    if (value == undefined || value.trim() === "") {
+        return "devnet";
+    }
+
+    if (!VALID_CKB_NETWORKS.includes(value as CkbNetwork)) {
+        throw new AppError(500, `Invalid CKB_NETWORK "${value}" (expected devnet, testnet or mainnet)`);
+    }
+
+    return value as CkbNetwork;
+}
+
 export default class AppConfiguration implements AppConfig {
     config: Config | undefined;
     constructor() {
@@ -91,6 +104,7 @@ export default class AppConfiguration implements AppConfig {
                 hashType: parseHashType("CKB_DEX_SCRIPT_HASH_TYPE", envs.CKB_DEX_SCRIPT_HASH_TYPE),
                 args: requireEnv("CKB_DEX_SCRIPT_ARGS", envs.CKB_DEX_SCRIPT_ARGS, DEFAULT_CONFIG.dexScriptArgs) as Hex,
             },
+            ckbNetwork: parseCkbNetwork(envs.CKB_NETWORK),
             enviroment: parseNodeEnv(envs.NODE_ENV),
             port: parseInteger("PORT", envs.PORT, DEFAULT_CONFIG.port),
             ckbRpcUrl: requireEnv("CKB_RPC_URL", envs.CKB_RPC_URL, DEFAULT_CONFIG.ckbRpcUrl),

@@ -13,9 +13,13 @@ export enum OrderType {"ASK", "BID"}
 
 export type NODE_ENV = "production" | "development";
 
+/** Which bucket of deployment/scripts.json and deployment/system-scripts.json to read. */
+export type CkbNetwork = "devnet" | "testnet" | "mainnet";
+
 export interface Config {
   mongodbUrl: string;
   ckbRpcUrl: string,
+  ckbNetwork: CkbNetwork,
   enviroment: NODE_ENV,
   dexOrderLockScript: Script,
   internalBotToken: string,

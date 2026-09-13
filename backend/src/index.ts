@@ -2,8 +2,8 @@
 import { createExpressServer } from "./app.js";
 import DexOrderBot from "./bot/index.js";
 import AppConfiguration from "./config.js";
-import { Database } from "./services";
-import { Config } from "./types";
+import { Database } from "./services/index.js";
+import { Config } from "./types/index.js";
 
 export let config: Config | undefined = undefined;
 

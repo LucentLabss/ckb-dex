@@ -230,6 +230,36 @@ select {
   padding: 0;
 }
 
+.refresh-balance-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  padding: 0;
+}
+
+.refresh-balance-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.refresh-balance-btn:disabled {
+  cursor: default;
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .copy-address-btn:hover {
   color: var(--text-primary);
   border-color: var(--text-secondary);
@@ -243,6 +273,16 @@ select {
   padding: 9px 12px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.faucet-btn {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.faucet-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .dev-signer-btn:hover {
@@ -832,6 +872,11 @@ tbody tr:last-child td {
   border-radius: 6px;
   padding: 4px 10px;
   font-size: 11px;
+}
+
+.cancel-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .cancel-btn:hover {

@@ -1,0 +1,46 @@
+services:
+  database:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - NODE_ENV=production
+      - MONGO_DB_URL=mongodb://database:27017/ckb-dex
+
+  faucet:
+    build:
+      context: .
+      dockerfile: faucet/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "3100:3100"
+    env_file:
+      - ./faucet/.env
+    environment:
+      - NODE_ENV=production
+      - MONGO_DB_URL=mongodb://database:27017/ckb-dex-faucet
+
+volumes:
+  mongo-data:
