@@ -51,7 +51,7 @@ html,
 body,
 #root {
   margin: 0;
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
@@ -62,6 +62,7 @@ body {
     sans-serif;
   font-size: 13px;
   line-height: 1.4;
+  overflow: hidden;
 }
 
 button,
@@ -96,11 +97,14 @@ button {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-page);
 }
 
 header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -275,12 +279,23 @@ select {
   font-weight: 600;
 }
 
-.faucet-btn {
-  width: 100%;
-  margin-top: 10px;
+.faucet-header-btn {
+  background: var(--bg-panel-2);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-.faucet-btn:disabled {
+.faucet-header-btn:hover:not(:disabled) {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.faucet-header-btn:disabled {
   opacity: 0.6;
   cursor: default;
 }
@@ -314,12 +329,21 @@ select {
 }
 
 .main {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   display: grid;
   grid-template-columns: 300px 1fr 280px;
+  /* Reserve a real, stable row for orders. The top trading controls get the remaining
+     space, while the table itself owns its scrolling area below. */
+  /* Keep enough vertical room for the complete order form and market balance/faucet
+     controls. The docked order table scrolls once it exceeds this compact row. */
+  grid-template-rows: minmax(0, 1fr) clamp(150px, 15vh, 200px);
   gap: 12px;
   max-width: 1400px;
   margin: 0 auto;
   padding: 12px;
+  overflow: hidden;
 }
 
 .panel {
@@ -339,6 +363,35 @@ select {
   font-size: 13px;
 }
 
+.order-entry-header {
+  gap: 12px;
+}
+
+.order-type-segment {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.order-type-segment button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.order-type-segment button + button {
+  border-left: 1px solid var(--border);
+}
+
+.order-type-segment button.active {
+  background: var(--bg-panel-2);
+  color: var(--text-primary);
+}
+
 .status-inline {
   color: var(--text-secondary);
   font-size: 11px;
@@ -351,6 +404,7 @@ select {
 .book-cols {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
   padding: 0 14px 6px;
   font-size: 11px;
   color: var(--text-muted);
@@ -365,6 +419,7 @@ select {
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
   width: 100%;
   padding: 3px 14px;
   border: none;
@@ -379,14 +434,18 @@ select {
   background: var(--bg-hover);
 }
 
-.book-row span:nth-child(2),
-.book-row span:nth-child(3) {
+/* Targeted by class, not nth-child: the row also contains a `.depth-bar` div (the
+   background fill), which shifts every span's child index by one - nth-child(2)/(3) here
+   used to land on Price+Amount instead of Amount+Total, leaving Total unstyled: left-aligned
+   and flush against Amount's right-aligned text with no gap (rendering e.g. "7010,070"). */
+.book-row .book-col-amount,
+.book-row .book-col-total {
   text-align: right;
   position: relative;
   z-index: 1;
 }
 
-.book-row span:first-child {
+.book-row .book-col-price {
   position: relative;
   z-index: 1;
 }
@@ -452,7 +511,7 @@ select {
 .depth-chart-svg {
   display: block;
   width: 100%;
-  height: 120px;
+  height: 150px;
   overflow: visible;
 }
 
@@ -461,17 +520,41 @@ select {
   stroke-width: 1;
 }
 
-.depth-chart-mid {
+.depth-chart-gridline {
   stroke: var(--border);
   stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: 0.6;
 }
 
+.depth-chart-gridlabel {
+  font-size: 10px;
+  fill: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.depth-chart-mid {
+  stroke: var(--text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.depth-chart-midlabel {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-primary);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+/* Stronger than the shared --green-dim/--red-dim tokens (14% alpha, tuned for small UI
+   chips) - at chart scale that reads as washed-out, so the depth fill gets its own,
+   more visible tint instead of touching those shared tokens. */
 .depth-chart-area.bid {
-  fill: var(--green-dim);
+  fill: color-mix(in srgb, var(--green) 22%, transparent);
 }
 
 .depth-chart-area.ask {
-  fill: var(--red-dim);
+  fill: color-mix(in srgb, var(--red) 22%, transparent);
 }
 
 .depth-chart-line {
@@ -490,8 +573,9 @@ select {
 }
 
 .depth-chart-endlabel {
-  font-size: 9px;
-  fill: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-primary);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
@@ -800,9 +884,13 @@ select {
 
 .orders-panel {
   grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .orders-tabs {
+  flex-shrink: 0;
   display: flex;
   gap: 4px;
   padding: 8px 10px 0;
@@ -825,7 +913,19 @@ select {
 
 #openOrdersPanel,
 #historyPanel {
+  flex: 1;
+  min-height: 0;
   overflow-x: auto;
+  overflow-y: auto;
+  /* Orders still scroll with a wheel/touchpad or touch gesture, without a distracting
+     permanent scrollbar beside the table. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+#openOrdersPanel::-webkit-scrollbar,
+#historyPanel::-webkit-scrollbar {
+  display: none;
 }
 
 table {
@@ -836,11 +936,14 @@ table {
 }
 
 thead th {
+  position: sticky;
+  top: 0;
   text-align: left;
   color: var(--text-muted);
   font-weight: 500;
   font-size: 11px;
   padding: 8px 14px;
+  background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1110,8 +1213,30 @@ tbody tr:last-child td {
 }
 
 @media (max-width: 1000px) {
+  body {
+    overflow-y: auto;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+  }
+
   .main {
+    flex: none;
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+    overflow: visible;
+  }
+
+  .orders-panel {
+    min-height: auto;
+  }
+
+  #openOrdersPanel,
+  #historyPanel {
+    flex: none;
+    max-height: 360px;
   }
 }
 
