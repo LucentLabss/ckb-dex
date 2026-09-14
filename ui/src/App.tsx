@@ -14,7 +14,6 @@ import {
   xudtTypeHash,
   type CancelableOrder,
 } from "./lib/dex";
-import { DepthChart } from "./components/DepthChart";
 import "./App.css";
 
 type Side = "buy" | "sell";
@@ -114,8 +113,6 @@ const fixtureBids: MarketRow[] = [
 const fixtureTrades: TradeEntry[] = [
   { time: "12:42:18", price: "0.008140", amount: "150", side: "buy", hash: "0x91a3...44b2" },
   { time: "12:39:02", price: "0.008150", amount: "60", side: "sell", hash: "0x0cfa...8e31" },
-  { time: "12:31:47", price: "0.008138", amount: "220", side: "buy", hash: "0x7d02...9c10" },
-  { time: "12:26:11", price: "0.008160", amount: "80", side: "sell", hash: "0x321e...51aa" },
 ];
 
 const defaultMidPrice = 0.00814;
@@ -128,6 +125,7 @@ const wsBase =
   apiBase.replace(/^http/, "ws").replace(/\/api\/v\d+\/?$/, "");
 const tradingPairLabel = xudtTypeHash ? "TOKEN / CKB" : "DEMO / CKB";
 const marketReady = Boolean(xudtTypeHash);
+const networkLabel = `${DEX_NETWORK.charAt(0).toUpperCase()}${DEX_NETWORK.slice(1)}`;
 
 // In dev the app always talks to the vite proxy at /api/ckb-rpc (the local CKB node has
 // no CORS headers of its own - see vite.config.ts). In a production build, fall back to a
@@ -212,6 +210,7 @@ function WalletApp() {
     TOKEN: 0,
   });
   const [faucetLoading, setFaucetLoading] = useState(false);
+  const [faucetCooldownSeconds, setFaucetCooldownSeconds] = useState(0);
   const [refreshingBalance, setRefreshingBalance] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -235,6 +234,16 @@ function WalletApp() {
       // localStorage unavailable (private browsing, etc.) - theme just won't persist
     }
   }, [theme]);
+
+  // The faucet only reports a cooldown after a claim attempt. Count it down locally so
+  // the action stays unavailable and the label remains useful without extra API polling.
+  useEffect(() => {
+    if (faucetCooldownSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      setFaucetCooldownSeconds((remaining) => Math.max(0, remaining - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [faucetCooldownSeconds > 0]);
 
   function toggleTheme() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
@@ -339,7 +348,13 @@ function WalletApp() {
       const body = await response.json().catch(() => null);
 
       if (!response.ok) {
-        showToast(body?.message ?? "Faucet claim failed");
+        const cooldownSeconds = readFaucetCooldownSeconds(body?.message);
+        if (cooldownSeconds !== null) {
+          setFaucetCooldownSeconds(cooldownSeconds);
+          showToast(`Faucet cooldown: available again in ${formatFaucetCooldown(cooldownSeconds)}`);
+        } else {
+          showToast(body?.message ?? "Faucet claim failed");
+        }
         return;
       }
 
@@ -798,9 +813,9 @@ function WalletApp() {
         <div className="header-left">
           <div className="logo">
             <span className="dot" />
-            CKB order book
+            LucentDex
           </div>
-          <span className="chain-badge">CKB {DEX_NETWORK}</span>
+          <span className="chain-badge">{networkLabel}</span>
           <span className="chain-badge">{tradingPairLabel}</span>
         </div>
 
@@ -832,6 +847,20 @@ function WalletApp() {
               <RefreshCw size={13} className={refreshingBalance ? "spin" : ""} />
             </button>
           </div>
+          {connected && faucetUrl && DEX_NETWORK !== "mainnet" ? (
+            <button
+              type="button"
+              className="faucet-header-btn"
+              disabled={faucetLoading || faucetCooldownSeconds > 0}
+              onClick={() => void claimFaucetTokens()}
+            >
+              {faucetLoading
+                ? "Requesting…"
+                : faucetCooldownSeconds > 0
+                  ? `TOKEN in ${formatFaucetCooldown(faucetCooldownSeconds)}`
+                  : "Get test TOKEN"}
+            </button>
+          ) : null}
           <div className="wallet-controls">
             <button
               type="button"
@@ -887,10 +916,6 @@ function WalletApp() {
             ) : null}
           </div>
           <div className="panel-body">
-            {askRows.length > 0 || bidRows.length > 0 ? (
-              <DepthChart bids={bidRows} asks={askRows} midPrice={midPrice} />
-            ) : null}
-
             <div className="book-cols">
               <span>Price (CKB)</span>
               <span>Amount (TOKEN)</span>
@@ -918,9 +943,9 @@ function WalletApp() {
                       className="depth-bar"
                       style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
                     />
-                    <span className="mono red">{fmtPrice(row.price)}</span>
-                    <span className="mono">{fmtAmount(row.amount)}</span>
-                    <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
+                    <span className="mono red book-col-price">{fmtPrice(row.price)}</span>
+                    <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted book-col-total">{fmtAmount(row.cumulative ?? 0)}</span>
                   </button>
                 ))
               )}
@@ -954,9 +979,9 @@ function WalletApp() {
                       className="depth-bar"
                       style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
                     />
-                    <span className="mono green">{fmtPrice(row.price)}</span>
-                    <span className="mono">{fmtAmount(row.amount)}</span>
-                    <span className="mono muted">{fmtAmount(row.cumulative ?? 0)}</span>
+                    <span className="mono green book-col-price">{fmtPrice(row.price)}</span>
+                    <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted book-col-total">{fmtAmount(row.cumulative ?? 0)}</span>
                   </button>
                 ))
               )}
@@ -965,7 +990,25 @@ function WalletApp() {
         </div>
 
         <div className="panel">
-          <div className="panel-header">Place order</div>
+          <div className="panel-header order-entry-header">
+            <span>Place order</span>
+            <div className="order-type-segment" aria-label="Order type">
+              <button
+                type="button"
+                className={orderType === "limit" ? "active" : ""}
+                onClick={() => setOrderTypeValue("limit")}
+              >
+                Limit
+              </button>
+              <button
+                type="button"
+                className={orderType === "market" ? "active" : ""}
+                onClick={() => setOrderTypeValue("market")}
+              >
+                Market
+              </button>
+            </div>
+          </div>
           <div className="panel-body trade-panel-body">
             <div className="seg" id="sideSeg">
               <button
@@ -981,23 +1024,6 @@ function WalletApp() {
                 onClick={() => setOrderSide("sell")}
               >
                 Sell
-              </button>
-            </div>
-
-            <div className="seg seg-type" id="typeSeg">
-              <button
-                type="button"
-                className={orderType === "limit" ? "active" : ""}
-                onClick={() => setOrderTypeValue("limit")}
-              >
-                Limit
-              </button>
-              <button
-                type="button"
-                className={orderType === "market" ? "active" : ""}
-                onClick={() => setOrderTypeValue("market")}
-              >
-                Market
               </button>
             </div>
 
@@ -1087,11 +1113,11 @@ function WalletApp() {
             <div className="trade-list">
               <div className="trade-list-header">Recent trades</div>
               {loadingMarket && trades.length === 0 ? (
-                <TradeRowSkeleton rows={3} />
+                <TradeRowSkeleton rows={2} />
               ) : trades.length === 0 ? (
                 <p className="book-empty">No trades yet</p>
               ) : (
-                trades.map((trade) => (
+                trades.slice(0, 2).map((trade) => (
                 <div key={`${trade.hash}-${trade.time}`} className="trade-row">
                   <span className={`trade-side ${trade.side}`}>
                     {trade.side === "buy" ? "Buy" : "Sell"}
@@ -1131,16 +1157,6 @@ function WalletApp() {
                     <span className="secondary">CKB</span>
                     <span className="mono amt">{fmtCkb(walletBalance.CKB)}</span>
                   </div>
-                  {faucetUrl && DEX_NETWORK !== "mainnet" ? (
-                    <button
-                      type="button"
-                      className="dev-signer-btn faucet-btn"
-                      disabled={faucetLoading}
-                      onClick={() => void claimFaucetTokens()}
-                    >
-                      {faucetLoading ? "Requesting…" : "Get test TOKEN"}
-                    </button>
-                  ) : null}
                 </>
               ) : (
                 <p className="muted">Connect your wallet to view balances.</p>
@@ -1537,7 +1553,7 @@ function normalizeOrderBook(items: ApiOrderItem[]) {
 }
 
 function normalizeTrades(items: ApiTradeItem[]): TradeEntry[] {
-  return items.slice(0, 4).map((item, index) => {
+  return items.slice(0, 2).map((item, index) => {
     const amount = Number.parseFloat(item.tokenAmount ?? "0") || 0;
     const totalCkb = shannonsToCkb(item.price);
     const price = amount > 0 ? totalCkb / amount : totalCkb;
@@ -1564,6 +1580,21 @@ function formatError(error: unknown, fallback: string) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return fallback;
+}
+
+function readFaucetCooldownSeconds(message: unknown): number | null {
+  if (typeof message !== "string") return null;
+  const match = /try again in (\d+)s/i.exec(message);
+  if (!match) return null;
+  const seconds = Number.parseInt(match[1], 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+function formatFaucetCooldown(seconds: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(seconds / 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
 function shortAddress(address: string) {
