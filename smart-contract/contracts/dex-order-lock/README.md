@@ -1,177 +1,147 @@
-# Fixed-Price DEX Order Lock
+# DEX Order Lock
 
-`dex-order-lock` is a simple fixed-price order contract for Nervos CKB.
+`dex-order-lock` is the on-chain settlement and cancellation contract for the
+CKB DEX proof of concept. One script handles both buy and sell orders.
 
-It locks one typed asset Cell, intended to contain an xUDT, and allows that Cell
-to be consumed in one of two ways:
-
-1. A buyer fills the order by paying the maker the fixed ask price plus the
-   Order Cell's capacity.
-2. The maker cancels the order by including an input protected by the maker's
-   lock script.
-
-This is intentionally a small V1 contract. It supports full fills, CKB payment,
-one order per transaction, and maker-authorized cancellation.
+Makers sign transactions that create their orders. A matcher can then settle a
+valid buy and sell pair without either maker signing the settlement. A maker
+authorizes cancellation by adding an input protected by their own lock script.
 
 ## Order Cell
 
-The Order Cell is expected to contain:
+Each order is a Cell whose lock is this DEX script.
 
-| Part | Purpose |
-| --- | --- |
-| Capacity | CKB used by the Cell and returned to the maker during a fill |
-| Lock | The `dex-order-lock` script |
-| Type | A trusted typed-asset script, intended to be xUDT |
-| Data | The token amount defined by the asset type script |
+| Side | Order Cell contents | What the maker expects when matched |
+| --- | --- | --- |
+| Buy | Plain CKB capacity reserved for the price, buyer's xUDT output, and any fee surplus | The exact xUDT type and amount under the maker's lock |
+| Sell | The exact xUDT type and token amount, plus Cell capacity | Plain CKB equal to the price plus the sell Order Cell capacity |
 
-The DEX lock validates payment and cancellation. It does not implement token
-accounting. The asset's type script is responsible for preserving the token
-identity and amount.
+The DEX lock validates the order terms and settlement outputs. The xUDT type
+script validates token rules and conservation.
 
-## Lock Arguments
+## Lock arguments
 
-The lock arguments must contain exactly 40 bytes:
+Arguments have a fixed length of 90 bytes:
 
 | Bytes | Size | Meaning |
 | --- | ---: | --- |
-| `0..32` | 32 bytes | Maker lock script hash |
-| `32..40` | 8 bytes | Ask price in shannons as a little-endian `u64` |
+| `0` | 1 byte | Format version, currently `1` |
+| `1` | 1 byte | Order side: `0` is buy, `1` is sell |
+| `2..34` | 32 bytes | Maker lock script hash |
+| `34..66` | 32 bytes | Expected xUDT type script hash |
+| `66..82` | 16 bytes | Exact token amount as little-endian `u128` |
+| `82..90` | 8 bytes | Total CKB price in shannons as little-endian `u64` |
+
+The price is the total price for the full order, not a per-token price.
+
+## Exact match validation
+
+A settlement must consume exactly two inputs using this DEX code hash and hash
+type. The inputs must contain one buy order and one sell order. Their xUDT type
+hash, token amount, and total CKB price must be identical.
+
+Both script groups validate the same pair. The buy order checks that the buyer
+receives the exact token amount under the buy maker's lock. The sell order
+checks that the seller receives plain CKB equal to the sell Order Cell capacity
+plus the agreed price.
 
 ```text
-args = maker_lock_hash || ask_price.to_le_bytes()
+Buy Order Cell capacity >= agreed price + buyer xUDT output capacity
+
+Seller plain CKB outputs >= sell Order Cell capacity + agreed price
 ```
 
-The ask price is only the sale price. It does not include the Order Cell's
-capacity.
+Any remaining capacity can contribute to the transaction fee. The transaction
+still has to satisfy CKB's overall input and output capacity rules.
 
-```text
-required maker capacity = order input capacity + ask price
-```
+The DEX lock does not require signatures from either maker for settlement. The
+matching bot builds and submits the transaction, while CKB runs both DEX lock
+groups and the xUDT type script to validate it.
 
-## Fill Validation
+## Cancellation validation
 
-A fill succeeds when all of these conditions are satisfied:
+A cancellation transaction must contain exactly one DEX Order Cell input and
+at least one input whose lock script hash equals the maker lock hash in that
+order's args. The maker's own lock script authenticates that input. The DEX
+contract detects the maker input and allows the order to be consumed.
 
-1. The lock arguments are exactly 40 bytes.
-2. The transaction contains exactly one input using this DEX program.
-3. No maker-locked input selects the cancellation path.
-4. The Order Cell contains a type script.
-5. Adding the order capacity and ask price does not overflow `u64`.
-6. The total capacity of all plain CKB outputs locked by the maker is at least
-   the required maker capacity.
+The DEX lock does not implement signature verification itself. It relies on
+the maker input's lock script to do that.
 
-The maker's payment may be split across multiple outputs. The contract sums
-only outputs whose full lock script hash matches the maker lock hash and whose
-type script is empty.
+## Validation details
 
-Typed maker outputs are ignored as payment. This prevents a buyer from
-"paying" the maker with CKB locked inside an unexpected type script that may be
-hard or impossible for the maker to spend.
+The contract checks these rules:
 
-The buyer does not appear in the lock arguments. Anyone may fill the order as
-long as the transaction satisfies the maker's payment condition.
+1. The current order args use the supported 90-byte format, version, and side.
+2. Cancellation consumes exactly one DEX order and includes maker authorization.
+3. Settlement consumes exactly one buy order and one sell order.
+4. Both orders declare the same xUDT type hash, amount, and total price.
+5. A sell Order Cell has the declared xUDT type and exact declared amount.
+6. The seller receives enough plain CKB, under the seller's lock, to cover the
+   sell Order Cell capacity plus the price.
+7. A buy Order Cell contains plain CKB and has enough capacity for the price and
+   the buyer's matching xUDT output capacity.
+8. The buy maker receives outputs with the declared xUDT type and exact total
+   token amount.
+9. Capacity and token sums use checked arithmetic and reject overflow.
 
-## Cancellation Validation
+The buyer token amount can be split across multiple outputs, provided their
+lock hash is the buy maker's lock hash and their type hash matches the expected
+xUDT type hash. The seller's CKB payment can also be split across multiple
+plain CKB outputs under the seller's lock.
 
-The maker cancels an order by including another input whose lock script hash
-matches the maker lock hash stored in the DEX arguments.
+The contract only compares the expected type script hash and token data. A
+production deployment must use a trusted xUDT type script. The unit tests use
+`always-success` scripts as mocks, which do not provide real asset protection.
 
-That input's own lock script is responsible for authenticating the maker. The
-DEX contract only detects the matching input and does not implement signature
-verification.
-
-The single-order rule is checked before cancellation. The cancellation path is
-then checked before the typed-asset requirement, allowing the maker to recover
-an accidentally untyped Order Cell.
-
-## Why Only One Order?
-
-V1 permits exactly one input using the DEX code hash and hash type.
-
-If several orders were processed together, the same maker payment output could
-be counted by more than one order. Supporting safe batch settlement would need
-additional grouping and accounting rules, so it is outside this version.
-
-## Script Responsibilities
-
-| Component | Responsibility |
-| --- | --- |
-| DEX order lock | Validate maker payment or maker-authorized cancellation |
-| xUDT type script | Enforce token identity, amount, and conservation |
-| Maker lock | Authenticate cancellation |
-| Buyer lock | Authorize spending the buyer's funding inputs |
-
-The DEX lock only checks that a type script exists on the fill path. A
-production Order Cell must therefore use a trusted asset type script such as
-xUDT. An `always-success` type script is used only as a unit-test mock and does
-not provide real token protection.
-
-## Error Codes
+## Error codes
 
 | Code | Meaning |
 | ---: | --- |
-| `-1` | Failed to load the currently executing script |
-| `-2` | Lock arguments are not exactly 40 bytes |
-| `-3` | Failed to convert the maker bytes into a 32-byte array |
-| `-4` | Failed to convert the price bytes into an 8-byte array |
-| `-5` | Failed to load the Order Cell capacity |
-| `-6` | Order capacity plus ask price overflowed `u64` |
-| `-7` | Summing maker output capacities overflowed `u64` |
-| `-8` | Failed to load a maker output's capacity |
-| `-9` | Maker outputs contain insufficient capacity |
-| `-10` | The transaction does not contain exactly one DEX order input |
-| `-11` | The Order Cell has no type script on the fill path |
-| `-12` | Failed to load the Order Cell's type script hash |
-| `-13` | Failed to load a maker output's type script hash |
+| `-1` | Failed to load the current script |
+| `-2` | Order args are not exactly 90 bytes |
+| `-3` | Failed to convert maker hash bytes |
+| `-4` | Failed to convert price bytes |
+| `-5` | Failed to load an order capacity |
+| `-6` | Capacity addition overflow |
+| `-7` | Seller output capacity sum overflow |
+| `-8` | Failed to load an output capacity |
+| `-9` | Seller received insufficient plain CKB |
+| `-10` | Invalid number of DEX inputs for match or cancellation |
+| `-12` | Failed to load an order input type hash |
+| `-13` | Failed to load an output type hash |
+| `-14` | Unsupported order format version |
+| `-15` | Unknown order side |
+| `-16` | Failed to convert xUDT type hash bytes |
+| `-17` | Invalid token amount bytes or data too short |
+| `-18` | The buy and sell orders do not match |
+| `-19` | Sell order input does not match its declared asset or amount |
+| `-20` | Failed to load Cell data |
+| `-21` | Buy maker received the wrong token amount or asset |
+| `-22` | Token amount sum overflow |
+| `-23` | Buyer token output capacity sum overflow |
+| `-24` | Buy order capacity is insufficient |
+| `-25` | Buy order input has a type script |
 
-## Build
+## Build and test
 
-From `ckb-dapp/smart-contract`:
+From `smart-contract/`, build the contract with:
 
 ```bash
 make run CONTRACT=dex-order-lock TASK=build
 ```
 
-## Test
-
 Run the DEX tests with:
 
 ```bash
-cargo test -p tests test_dex_ -- --nocapture
+cargo test -p tests test_dex_
 ```
 
-The test suite covers:
+The tests cover a successful exact match, mismatched orders, wrong settlement
+outputs, underfunded orders, malformed args, and maker-authorized cancellation.
 
-- Correct fill
-- Underpayment
-- Payment to the wrong lock
-- Typed maker payment outputs being ignored
-- Maker-authorized cancellation
-- Cancellation without maker authorization
-- Malformed lock arguments
-- Missing type script
-- Multiple DEX order inputs
-- Capacity addition overflow
+## PoC limits
 
-The current successful-path measurements are:
-
-```text
-Fill:         44,214 cycles
-Cancellation: 38,509 cycles
-```
-
-## V1 Limitations
-
-This version does not support:
-
-- Partial fills
-- Multiple orders in one transaction
-- Token-to-token payment
-- Fees
-- Variable pricing
-- Order matching
-- Liquidity pools
-- A global on-chain order book
-
-These exclusions keep the contract focused on one responsibility: safely
-settling or cancelling one fixed-price order.
+This version does not support partial fills, differing order amounts, price
+improvement, multi-order settlement, other payment assets, or an on-chain order
+book. Order discovery and matching are handled off-chain.
