@@ -1,92 +1,177 @@
 import { ccc } from "@ckb-ccc/core";
-import {
-  buyerAddress,
-  buyerSigner,
-  client,
-  dexDeployment,
-  makerLock,
-  xudtDeployment,
-  xudtType,
-} from "./shared.js";
+import dexScriptsJson from "../../deployment/scripts.json" with { type: "json" };
+import systemScriptsJson from "../../deployment/system-scripts.json" with { type: "json" };
 
-const orderTxHash = process.env.ORDER_TX_HASH;
-if (!orderTxHash) {
-  throw new Error("ORDER_TX_HASH is missing from .env");
+const ORDER_VERSION = 1;
+const SIDE_BUY = 0;
+const SIDE_SELL = 1;
+const ORDER_ARGS_LENGTH = 90;
+const FEE_RATE = 1_000n;
+
+interface DeploymentScript {
+  codeHash: string;
+  hashType: string;
+  cellDeps: { cellDep: ccc.CellDepLike }[];
 }
 
-const orderOutputIndex = BigInt(process.env.ORDER_OUTPUT_INDEX ?? "0");
-if (orderOutputIndex < 0n) {
-  throw new Error("ORDER_OUTPUT_INDEX must not be negative");
+interface SystemScriptEntry {
+  script: DeploymentScript;
 }
 
-const orderOutPoint = ccc.OutPoint.from({
-  txHash: orderTxHash,
-  index: orderOutputIndex,
-});
-
-const orderCell = await client.getCellLive(orderOutPoint, true, true);
-if (!orderCell) {
-  throw new Error("Order Cell does not exist or has already been spent");
+interface OrderTerms {
+  side: number;
+  makerLockHash: string;
+  xudtTypeHash: string;
+  amount: bigint;
+  price: bigint;
 }
 
-const orderLock = orderCell.cellOutput.lock;
-const orderType = orderCell.cellOutput.type;
+function readOrderTerms(lock: ccc.Script): OrderTerms {
+  const args = ccc.bytesFrom(lock.args);
+  if (args.length !== ORDER_ARGS_LENGTH) {
+    throw new Error(`Expected ${ORDER_ARGS_LENGTH}-byte DEX args, got ${args.length}`);
+  }
 
+  if (args[0] !== ORDER_VERSION) {
+    throw new Error(`Unsupported DEX order version: ${args[0]}`);
+  }
+
+  const side = args[1];
+  if (side !== SIDE_BUY && side !== SIDE_SELL) {
+    throw new Error(`Unknown DEX order side: ${side}`);
+  }
+
+  return {
+    side,
+    makerLockHash: ccc.hexFrom(args.slice(2, 34)),
+    xudtTypeHash: ccc.hexFrom(args.slice(34, 66)),
+    amount: ccc.numLeFromBytes(ccc.hexFrom(args.slice(66, 82))),
+    price: ccc.numLeFromBytes(ccc.hexFrom(args.slice(82, 90))),
+  };
+}
+
+function readOutPoint(prefix: "BUY" | "SELL"): ccc.OutPoint {
+  const txHash = process.env[`${prefix}_ORDER_TX_HASH`];
+  if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    throw new Error(`${prefix}_ORDER_TX_HASH must be a 32-byte transaction hash`);
+  }
+
+  const indexText = process.env[`${prefix}_ORDER_OUTPUT_INDEX`] ?? "0";
+  let index: bigint;
+  try {
+    index = BigInt(indexText);
+  } catch {
+    throw new Error(`${prefix}_ORDER_OUTPUT_INDEX must be a non-negative integer`);
+  }
+  if (index < 0n) {
+    throw new Error(`${prefix}_ORDER_OUTPUT_INDEX must be a non-negative integer`);
+  }
+
+  return ccc.OutPoint.from({ txHash, index });
+}
+
+async function findMakerLock(
+  outPoint: ccc.OutPoint,
+  makerLockHash: string,
+): Promise<ccc.Script> {
+  const creatingTx = await client.getTransaction(outPoint.txHash);
+  if (!creatingTx || creatingTx.status !== "committed") {
+    throw new Error(`Could not find the committed order-creation transaction ${outPoint.txHash}`);
+  }
+
+  for (const input of creatingTx.transaction.inputs) {
+    const previousCell = await client.getCell(input.previousOutput);
+    if (previousCell?.cellOutput.lock.hash() === makerLockHash) {
+      return previousCell.cellOutput.lock;
+    }
+  }
+
+  throw new Error(`No creation-transaction input matches maker lock hash ${makerLockHash}`);
+}
+
+const network = process.env.CKB_NETWORK ?? "devnet";
+const rpcUrl = process.env.CKB_RPC_URL;
+if (!rpcUrl) throw new Error("CKB_RPC_URL is missing from .env");
+
+const dexDeployment = (
+  dexScriptsJson as Record<string, Record<string, DeploymentScript | undefined>>
+)[network]?.["dex-order-lock"];
+if (!dexDeployment) {
+  throw new Error(`No dex-order-lock deployment found for network ${network}`);
+}
+
+const systemScripts = (
+  systemScriptsJson as Record<string, Record<string, SystemScriptEntry> | undefined>
+)[network];
+const xudtDeployment = systemScripts?.xudt?.script;
+if (!xudtDeployment) {
+  throw new Error(`No xUDT system script found for network ${network}`);
+}
+
+const client = new ccc.ClientPublicTestnet({ url: rpcUrl, fallbacks: [] });
+const buyOutPoint = readOutPoint("BUY");
+const sellOutPoint = readOutPoint("SELL");
+
+const [buyCell, sellCell] = await Promise.all([
+  client.getCellLive(buyOutPoint, true, true),
+  client.getCellLive(sellOutPoint, true, true),
+]);
+if (!buyCell) throw new Error("Buy Order Cell is missing or already spent");
+if (!sellCell) throw new Error("Sell Order Cell is missing or already spent");
+
+for (const cell of [buyCell, sellCell]) {
+  if (
+    cell.cellOutput.lock.codeHash !== dexDeployment.codeHash ||
+    cell.cellOutput.lock.hashType !== dexDeployment.hashType
+  ) {
+    throw new Error("Both selected cells must use the configured DEX order lock");
+  }
+}
+
+const buy = readOrderTerms(buyCell.cellOutput.lock);
+const sell = readOrderTerms(sellCell.cellOutput.lock);
+if (buy.side !== SIDE_BUY || sell.side !== SIDE_SELL) {
+  throw new Error("Select one BID (buy) Order Cell and one ASK (sell) Order Cell");
+}
 if (
-  orderLock.codeHash !== dexDeployment.codeHash ||
-  orderLock.hashType !== dexDeployment.hashType
+  buy.xudtTypeHash !== sell.xudtTypeHash ||
+  buy.amount !== sell.amount ||
+  buy.price !== sell.price
 ) {
-  throw new Error("The selected Cell is not protected by this DEX contract");
+  throw new Error("The buy and sell orders must have the same xUDT, amount, and total price");
 }
 
-if (!orderType) {
-  throw new Error("The selected Order Cell has no type script");
+if (buyCell.cellOutput.type) {
+  throw new Error("A buy Order Cell must not have a type script");
+}
+const sellType = sellCell.cellOutput.type;
+if (!sellType || sellType.hash() !== sell.xudtTypeHash) {
+  throw new Error("The sell Order Cell type script does not match its declared xUDT hash");
+}
+if (ccc.udtBalanceFrom(sellCell.outputData) !== sell.amount) {
+  throw new Error("The sell Order Cell token amount does not match its declared amount");
 }
 
-if (!orderType.eq(xudtType)) {
-  throw new Error("The selected Order Cell does not contain the expected xUDT");
+const [buyerLock, sellerLock] = await Promise.all([
+  findMakerLock(buyOutPoint, buy.makerLockHash),
+  findMakerLock(sellOutPoint, sell.makerLockHash),
+]);
+
+const sellerPayment = sellCell.cellOutput.capacity + sell.price;
+if (sellerPayment > 0xffff_ffff_ffff_ffffn) {
+  throw new Error("Seller payment exceeds the maximum u64 capacity");
 }
-
-const dexArgsBytes = ccc.bytesFrom(orderLock.args);
-if (dexArgsBytes.length !== 40) {
-  throw new Error(`Expected 40-byte DEX args, got ${dexArgsBytes.length}`);
-}
-
-const makerLockHashFromArgs = ccc.hexFrom(dexArgsBytes.slice(0, 32));
-if (makerLock.hash() !== makerLockHashFromArgs) {
-  throw new Error("The configured maker lock does not match the Order Cell");
-}
-
-const askPrice = ccc.numLeFromBytes(dexArgsBytes.slice(32, 40));
-const makerPayment = orderCell.cellOutput.capacity + askPrice;
-const tokenAmount = ccc.udtBalanceFrom(orderCell.outputData);
-
-console.log("Order OutPoint:", {
-  txHash: orderOutPoint.txHash,
-  index: orderOutPoint.index.toString(),
-});
-console.log("Order capacity:", orderCell.cellOutput.capacity.toString());
-console.log("Ask price:", askPrice.toString());
-console.log("Maker payment:", makerPayment.toString());
-console.log("Order token amount:", tokenAmount.toString());
 
 const fillOrderTx = ccc.Transaction.from({
   inputs: [
-    {
-      previousOutput: orderOutPoint,
-    },
+    { previousOutput: buyOutPoint },
+    { previousOutput: sellOutPoint },
   ],
   outputs: [
-    {
-      capacity: makerPayment,
-      lock: makerLock,
-    },
-    {
-      lock: buyerAddress.script,
-      type: orderType,
-    },
+    { capacity: sellerPayment, lock: sellerLock },
+    { lock: buyerLock, type: sellType },
   ],
-  outputsData: ["0x", orderCell.outputData],
+  outputsData: ["0x", sellCell.outputData],
 });
 
 fillOrderTx.addCellDeps(
@@ -94,42 +179,26 @@ fillOrderTx.addCellDeps(
   xudtDeployment.cellDeps.map(({ cellDep }) => cellDep),
 );
 
-const capacityInputsAdded = await fillOrderTx.completeInputsByCapacity(
-  buyerSigner,
-);
+const buyerTokenCapacity = fillOrderTx.outputs[1].capacity;
+const feeReserve = fillOrderTx.estimateFee(FEE_RATE) + 5_000n;
+const requiredBuyCapacity = sell.price + buyerTokenCapacity + feeReserve;
+if (buyCell.cellOutput.capacity < requiredBuyCapacity) {
+  throw new Error(
+    `Buy Order Cell needs at least ${requiredBuyCapacity} shannons to cover price, buyer token-cell capacity, and fee reserve`,
+  );
+}
 
-console.log("Buyer capacity inputs added:", capacityInputsAdded);
+console.log("Buy Order Cell:", `${buyOutPoint.txHash}:${buyOutPoint.index}`);
+console.log("Sell Order Cell:", `${sellOutPoint.txHash}:${sellOutPoint.index}`);
+console.log("Matched token amount:", buy.amount.toString());
+console.log("Matched total price (shannons):", buy.price.toString());
+console.log("Seller receives (shannons):", sellerPayment.toString());
+console.log("Buyer token-cell capacity (shannons):", buyerTokenCapacity.toString());
+console.log("Fee reserve (shannons):", feeReserve.toString());
+console.log("Transaction inputs:", fillOrderTx.inputs.length);
+console.log("Transaction outputs:", fillOrderTx.outputs.length);
 
-const [feeInputsAdded, hasChange] = await fillOrderTx.completeFeeBy(
-  buyerSigner,
-  1_000,
-);
-
-console.log("Additional fee inputs:", feeInputsAdded);
-console.log("Buyer change created:", hasChange);
-console.log("Fill transaction inputs:", fillOrderTx.inputs.length);
-console.log("Fill transaction outputs:", fillOrderTx.outputs.length);
-
-fillOrderTx.outputs.forEach((output, index) => {
-  console.log(`Output ${index}:`, {
-    capacity: output.capacity.toString(),
-    lockHash: output.lock.hash(),
-    typeHash: output.type?.hash() ?? "none",
-    data: fillOrderTx.outputsData[index],
-  });
-});
-
-console.log(
-  "Final CellDeps:",
-  fillOrderTx.cellDeps.map((cellDep) => ({
-    txHash: cellDep.outPoint.txHash,
-    index: cellDep.outPoint.index.toString(),
-    depType: cellDep.depType,
-  })),
-);
-
-const txHash = await buyerSigner.sendTransaction(fillOrderTx);
-console.log("Fill transaction sent:", txHash);
-
+const txHash = await client.sendTransaction(fillOrderTx);
+console.log("Settlement transaction sent:", txHash);
 await client.waitTransaction(txHash);
-console.log("Fill transaction committed:", txHash);
+console.log("Settlement transaction committed:", txHash);

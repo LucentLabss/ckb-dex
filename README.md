@@ -173,10 +173,11 @@ cd backend && npm install && npm run dev      # API on :3000
 cd faucet  && npm install && npm run dev      # faucet on :3100
 cd ui      && npm install && npm run dev      # Vite dev server
 
-# Off-chain helper scripts (need MAKER_PRIVATE_KEY / BUYER_PRIVATE_KEY)
+# Off-chain helper scripts
 cd offchain && npm install
-npm run issue-token
-npm run create-order
+npm run issue-token   # requires the offchain maker/buyer keys
+npm run create-order  # requires the offchain maker/buyer keys
+npm run fill-order    # requires the buy and sell order outpoints; no maker signature
 ```
 
 Key environment variables:
