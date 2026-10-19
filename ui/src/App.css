@@ -548,6 +548,16 @@ select {
   color: var(--text-primary);
 }
 
+.faucet-button {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  margin-right: 12px;
+  padding: 9px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .field {
   margin-bottom: 10px;
 }
