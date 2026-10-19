@@ -13,7 +13,7 @@ Each order is a Cell whose lock is this DEX script.
 
 | Side | Order Cell contents | What the maker expects when matched |
 | --- | --- | --- |
-| Buy | Plain CKB capacity reserved for the price, buyer's xUDT output, and any fee surplus | The exact xUDT type and amount under the maker's lock |
+| Buy | CKB for the price, buyer's xUDT output, and network fee | The exact xUDT amount and all remaining CKB after the price and allowed fee deduction |
 | Sell | The exact xUDT type and token amount, plus Cell capacity | Plain CKB equal to the price plus the sell Order Cell capacity |
 
 The DEX lock validates the order terms and settlement outputs. The xUDT type
@@ -48,11 +48,29 @@ plus the agreed price.
 ```text
 Buy Order Cell capacity >= agreed price + buyer xUDT output capacity
 
+Buy Order Cell capacity - agreed price - buyer xUDT output capacity <= 10,000 shannons
+
 Seller plain CKB outputs >= sell Order Cell capacity + agreed price
 ```
 
-Any remaining capacity can contribute to the transaction fee. The transaction
-still has to satisfy CKB's overall input and output capacity rules.
+The bot and fill helper estimate the network fee from the complete transaction.
+They return all excess buy-order CKB by increasing the capacity of the buyer's
+existing xUDT output. Settlement creates two outputs without a separate change
+Cell: the seller's CKB payment and the buyer's xUDT Cell with the remaining CKB.
+Both builders use `shared/settlement-capacity.mjs` for this calculation.
+
+`MAX_SETTLEMENT_FEE` is 10,000 shannons (0.0001 CKB). A matcher can deduct at most
+that much beyond the agreed price. The limit covers miner fees, seller
+overpayments, and unrelated outputs. Only outputs with the buyer's
+lock hash and expected xUDT type hash count toward the refund.
+
+The cap limits the buyer's deduction, not the total miner fee of a transaction
+with other funding inputs. The bot and fill helper deduct only the calculated
+network fee. They reject fees above the cap, and a test checks that their cap
+matches the contract's. The order args stay at 90 bytes.
+
+At the configured rate of 1,000 shannons per 1,000 bytes, the sample settlements
+cost 557 to 773 shannons. The 10,000-shannon cap leaves room for larger scripts.
 
 The DEX lock does not require signatures from either maker for settlement. The
 matching bot builds and submits the transaction, while CKB runs both DEX lock
@@ -84,6 +102,7 @@ The contract checks these rules:
 8. The buy maker receives outputs with the declared xUDT type and exact total
    token amount.
 9. Capacity and token sums use checked arithmetic and reject overflow.
+10. The buyer's CKB deduction beyond the price must not exceed 10,000 shannons.
 
 The buyer token amount can be split across multiple outputs, provided their
 lock hash is the buy maker's lock hash and their type hash matches the expected
@@ -122,6 +141,7 @@ production deployment must use a trusted xUDT type script. The unit tests use
 | `-23` | Buyer token output capacity sum overflow |
 | `-24` | Buy order capacity is insufficient |
 | `-25` | Buy order input has a type script |
+| `-26` | Buyer's deduction beyond the price exceeds 10,000 shannons |
 
 ## Build and test
 
@@ -138,7 +158,9 @@ cargo test -p tests test_dex_
 ```
 
 The tests cover a successful exact match, mismatched orders, wrong settlement
-outputs, underfunded orders, malformed args, and maker-authorized cancellation.
+outputs, underfunded orders, malformed args, maker-authorized cancellation,
+fee-cap boundaries, split token-output refunds, and attempts to divert buyer
+surplus to fees or other outputs.
 
 ## PoC limits
 

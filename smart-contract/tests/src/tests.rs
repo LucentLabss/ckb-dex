@@ -58,7 +58,8 @@ const SIDE_SELL: u8 = 1;
 const PRICE: u64 = 500 * CKB;
 const SELL_ORDER_CAPACITY: u64 = 200 * CKB;
 const BUYER_TOKEN_CAPACITY: u64 = 200 * CKB;
-const MATCH_FEE_RESERVE: u64 = CKB;
+const MAX_SETTLEMENT_FEE: u64 = 10_000;
+const MATCH_FEE_RESERVE: u64 = MAX_SETTLEMENT_FEE;
 const BUY_ORDER_CAPACITY: u64 = PRICE + BUYER_TOKEN_CAPACITY + MATCH_FEE_RESERVE;
 const AUTHORIZATION_CAPACITY: u64 = 100 * CKB;
 const TOKEN_AMOUNT: u128 = 1_000;
@@ -220,6 +221,30 @@ impl DexTestEnv {
             self.sell_order_input(sell_lock, sell_amount),
         )
     }
+
+    fn refund_transaction(
+        &mut self,
+        buy_capacity: u64,
+        buyer_token_capacity: u64,
+        extra_output: Option<CellOutput>,
+    ) -> TransactionView {
+        let buyer_lock = self.buyer_lock.clone();
+        let seller_lock = self.seller_lock.clone();
+        let buy_lock = self.order_lock(SIDE_BUY, &buyer_lock, TOKEN_AMOUNT, PRICE);
+        let sell_lock = self.order_lock(SIDE_SELL, &seller_lock, TOKEN_AMOUNT, PRICE);
+        let buy_input = self.buy_order_input(buy_lock, buy_capacity);
+        let sell_input = self.sell_order_input(sell_lock, TOKEN_AMOUNT);
+        let mut outputs = vec![
+            output(SELL_ORDER_CAPACITY + PRICE, seller_lock, None),
+            output(buyer_token_capacity, buyer_lock, Some(self.xudt_type.clone())),
+        ];
+        let mut data = vec![Bytes::new(), token_data(TOKEN_AMOUNT)];
+        if let Some(extra) = extra_output {
+            outputs.push(extra);
+            data.push(Bytes::new());
+        }
+        self.transaction(vec![buy_input, sell_input], outputs, data)
+    }
 }
 
 fn token_data(amount: u128) -> Bytes {
@@ -273,6 +298,155 @@ fn test_dex_exact_buy_and_sell_match_succeeds() {
         .verify_tx(&tx, MAX_CYCLES)
         .expect("matching buy and sell orders should settle");
     println!("successful exact match cycles: {cycles}");
+}
+
+#[test]
+fn test_dex_exact_match_with_large_refund_in_buyer_token_cell_succeeds() {
+    let mut env = DexTestEnv::new();
+    let buyer_lock = env.buyer_lock.clone();
+    let seller_lock = env.seller_lock.clone();
+    let buy_lock = env.order_lock(SIDE_BUY, &buyer_lock, TOKEN_AMOUNT, PRICE);
+    let sell_lock = env.order_lock(SIDE_SELL, &seller_lock, TOKEN_AMOUNT, PRICE);
+    let extra_capacity = 100 * CKB;
+    let buy_input = env.buy_order_input(buy_lock, BUY_ORDER_CAPACITY + extra_capacity);
+    let sell_input = env.sell_order_input(sell_lock, TOKEN_AMOUNT);
+    let tx = env.transaction(
+        vec![buy_input, sell_input],
+        vec![
+            output(SELL_ORDER_CAPACITY + PRICE, seller_lock, None),
+            output(
+                BUYER_TOKEN_CAPACITY + extra_capacity + MATCH_FEE_RESERVE - 1_000,
+                buyer_lock,
+                Some(env.xudt_type.clone()),
+            ),
+        ],
+        vec![Bytes::new(), token_data(TOKEN_AMOUNT)],
+    );
+
+    env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect("buyer token cell can hold the large CKB refund");
+}
+
+#[test]
+fn test_dex_exact_match_with_refund_in_buyer_token_cell_succeeds() {
+    let mut env = DexTestEnv::new();
+    let (buy_input, sell_input) =
+        env.matching_order_inputs(TOKEN_AMOUNT, PRICE, TOKEN_AMOUNT, PRICE);
+    let fee = 1_000;
+    let tx = env.transaction(
+        vec![buy_input, sell_input],
+        vec![
+            output(SELL_ORDER_CAPACITY + PRICE, env.seller_lock.clone(), None),
+            output(
+                BUYER_TOKEN_CAPACITY + MATCH_FEE_RESERVE - fee,
+                env.buyer_lock.clone(),
+                Some(env.xudt_type.clone()),
+            ),
+        ],
+        vec![Bytes::new(), token_data(TOKEN_AMOUNT)],
+    );
+
+    env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect("buyer token cell can hold the small CKB refund");
+}
+
+#[test]
+fn test_dex_buyer_refund_fee_cap_boundary() {
+    for deduction in [0, MAX_SETTLEMENT_FEE, MAX_SETTLEMENT_FEE + 1] {
+        let mut env = DexTestEnv::new();
+        let tx = env.refund_transaction(
+            BUY_ORDER_CAPACITY,
+            BUY_ORDER_CAPACITY - PRICE - deduction,
+            None,
+        );
+        let result = env.context.verify_tx(&tx, MAX_CYCLES);
+        if deduction <= MAX_SETTLEMENT_FEE {
+            result.expect("zero deduction and the exact fee cap should pass");
+        } else {
+            assert_validation_failure(result.expect_err("one shannon above the cap must fail"), -26);
+        }
+    }
+}
+
+#[test]
+fn test_dex_burning_the_old_buy_surplus_as_fee_fails() {
+    let mut env = DexTestEnv::new();
+    let tx = env.refund_transaction(
+        PRICE + BUYER_TOKEN_CAPACITY + CKB,
+        BUYER_TOKEN_CAPACITY,
+        None,
+    );
+    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect_err("burning one CKB of buyer surplus must fail");
+    assert_validation_failure(error, -26);
+}
+
+#[test]
+fn test_dex_diverting_buyer_surplus_to_attacker_fails() {
+    let mut env = DexTestEnv::new();
+    let diverted = 100 * CKB;
+    let attacker_output = output(diverted, env.attacker_lock.clone(), None);
+    let tx = env.refund_transaction(
+        BUY_ORDER_CAPACITY + diverted,
+        BUYER_TOKEN_CAPACITY,
+        Some(attacker_output),
+    );
+    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect_err("a small miner fee must not hide a large diversion to an attacker");
+    assert_validation_failure(error, -26);
+}
+
+#[test]
+fn test_dex_overpaying_seller_with_buyer_surplus_fails() {
+    let mut env = DexTestEnv::new();
+    let diverted = 100 * CKB;
+    let seller_extra = output(diverted, env.seller_lock.clone(), None);
+    let tx = env.refund_transaction(
+        BUY_ORDER_CAPACITY + diverted,
+        BUYER_TOKEN_CAPACITY,
+        Some(seller_extra),
+    );
+    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect_err("seller overpayment must not replace the buyer's refund");
+    assert_validation_failure(error, -26);
+}
+
+#[test]
+fn test_dex_plain_buyer_output_does_not_replace_token_cell_refund() {
+    let mut env = DexTestEnv::new();
+    let refund = 100 * CKB;
+    let plain_refund = output(refund, env.buyer_lock.clone(), None);
+    let tx = env.refund_transaction(
+        BUY_ORDER_CAPACITY + refund,
+        BUYER_TOKEN_CAPACITY,
+        Some(plain_refund),
+    );
+    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect_err("the refund must remain in outputs carrying the buyer's expected xUDT");
+    assert_validation_failure(error, -26);
+}
+
+#[test]
+fn test_dex_buyer_refund_can_span_matching_token_outputs() {
+    let mut env = DexTestEnv::new();
+    let (buy_input, sell_input) =
+        env.matching_order_inputs(TOKEN_AMOUNT, PRICE, TOKEN_AMOUNT, PRICE);
+    let fee = 1_000;
+    let tx = env.transaction(
+        vec![buy_input, sell_input],
+        vec![
+            output(SELL_ORDER_CAPACITY + PRICE, env.seller_lock.clone(), None),
+            output(100 * CKB, env.buyer_lock.clone(), Some(env.xudt_type.clone())),
+            output(
+                BUY_ORDER_CAPACITY - PRICE - 100 * CKB - fee,
+                env.buyer_lock.clone(),
+                Some(env.xudt_type.clone()),
+            ),
+        ],
+        vec![Bytes::new(), token_data(400), token_data(TOKEN_AMOUNT - 400)],
+    );
+    env.context.verify_tx(&tx, MAX_CYCLES)
+        .expect("sum the buyer's expected token outputs for both amount and refund");
 }
 
 #[test]

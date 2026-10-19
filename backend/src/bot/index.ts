@@ -9,6 +9,7 @@ import { EventIngestionService } from "../services/event-ingestion.js";
 import { toBuffer, toHex } from "../utils/index.js";
 import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
 import systemScriptsJson from "../../../deployment/system-scripts.json" with { type: "json" };
+import { allocateSettlementCapacity } from "../../../shared/settlement-capacity.mjs";
 
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
@@ -376,17 +377,23 @@ export default class DexOrderBot implements DexOrderBotTrait {
       outputsData: ["0x", sellOrder.cellData as Hex],
     });
 
-    // The seller must be paid capacity + price exactly (validate_sell_order rejects less),
-    // so the fee can only come from surplus on the buy order's own capacity.
-    const buyerTokenCapacity = tx.outputs[1].capacity;
-    const fee = tx.estimateFee(SETTLEMENT_FEE_RATE) + 5_000n;
-    const buyCapacity = BigInt(buyOrder.capacity);
-    if (buyCapacity < price + buyerTokenCapacity + fee) {
+    // Include dependencies before measuring the final transaction size and fee.
+    tx.addCellDeps(this.dexCellDeps);
+    tx.addCellDeps(this.xudtCellDeps);
+    const allocation = allocateSettlementCapacity({
+      buyCapacity: BigInt(buyOrder.capacity),
+      price,
+      minimumTokenCapacity: tx.outputs[1].capacity,
+      fee: tx.estimateFee(SETTLEMENT_FEE_RATE),
+    });
+    if (!allocation) {
       throw new AppError(
         409,
         `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell + the network fee`,
       );
     }
+
+    tx.outputs[1].capacity = allocation.tokenCapacity;
 
     const reservedBuy = await this.reserve(buyOrder._id!);
     if (!reservedBuy) {
@@ -407,9 +414,6 @@ export default class DexOrderBot implements DexOrderBotTrait {
       if (!buyStillLive || !sellStillLive) {
         throw new AppError(409, "one of the matched orders was already settled on-chain");
       }
-
-      tx.addCellDeps(this.dexCellDeps);
-      tx.addCellDeps(this.xudtCellDeps);
 
       const txHash = await this.client.sendTransaction(tx);
 

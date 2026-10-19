@@ -21,6 +21,8 @@ const ORDER_ARGS_LEN: usize = 90;
 const ORDER_VERSION: u8 = 1;
 const SIDE_BUY: u8 = 0;
 const SIDE_SELL: u8 = 1;
+// Maximum CKB the buyer may lose beyond the agreed price: 0.0001 CKB.
+const MAX_SETTLEMENT_FEE: u64 = 10_000;
 
 const ERROR_LOAD_SCRIPT: i8 = -1;
 const ERROR_ARGS_LENGTH: i8 = -2;
@@ -46,6 +48,7 @@ const ERROR_TOKEN_AMOUNT_OVERFLOW: i8 = -22;
 const ERROR_BUYER_TOKEN_CAPACITY_OVERFLOW: i8 = -23;
 const ERROR_BUY_ORDER_CAPACITY: i8 = -24;
 const ERROR_BUY_ORDER_TYPE: i8 = -25;
+const ERROR_BUYER_CAPACITY_REFUND: i8 = -26;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct OrderArgs {
@@ -187,8 +190,13 @@ fn validate_buy_order(index: usize, order: OrderArgs) -> Result<(), i8> {
         .checked_add(buyer_token_capacity)
         .ok_or(ERROR_CAPACITY_OVERFLOW)?;
 
-    if buy_order_capacity < required_buy_capacity {
-        return Err(ERROR_BUY_ORDER_CAPACITY);
+    let unreturned_capacity = buy_order_capacity
+        .checked_sub(required_buy_capacity)
+        .ok_or(ERROR_BUY_ORDER_CAPACITY)?;
+
+    // Bound the deduction even when it is diverted to another output instead of a miner.
+    if unreturned_capacity > MAX_SETTLEMENT_FEE {
+        return Err(ERROR_BUYER_CAPACITY_REFUND);
     }
 
     Ok(())

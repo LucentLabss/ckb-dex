@@ -1,6 +1,7 @@
 import { ccc } from "@ckb-ccc/core";
 import dexScriptsJson from "../../deployment/scripts.json" with { type: "json" };
 import systemScriptsJson from "../../deployment/system-scripts.json" with { type: "json" };
+import { allocateSettlementCapacity } from "../../shared/settlement-capacity.mjs";
 
 const ORDER_VERSION = 1;
 const SIDE_BUY = 0;
@@ -179,22 +180,29 @@ fillOrderTx.addCellDeps(
   xudtDeployment.cellDeps.map(({ cellDep }) => cellDep),
 );
 
-const buyerTokenCapacity = fillOrderTx.outputs[1].capacity;
-const feeReserve = fillOrderTx.estimateFee(FEE_RATE) + 5_000n;
-const requiredBuyCapacity = sell.price + buyerTokenCapacity + feeReserve;
-if (buyCell.cellOutput.capacity < requiredBuyCapacity) {
+const minimumTokenCapacity = fillOrderTx.outputs[1].capacity;
+const allocation = allocateSettlementCapacity({
+  buyCapacity: buyCell.cellOutput.capacity,
+  price: sell.price,
+  minimumTokenCapacity,
+  fee: fillOrderTx.estimateFee(FEE_RATE),
+});
+if (!allocation) {
   throw new Error(
-    `Buy Order Cell needs at least ${requiredBuyCapacity} shannons to cover price, buyer token-cell capacity, and fee reserve`,
+    "Buy Order Cell cannot cover the price, buyer token-cell capacity, and network fee",
   );
 }
+
+fillOrderTx.outputs[1].capacity = allocation.tokenCapacity;
 
 console.log("Buy Order Cell:", `${buyOutPoint.txHash}:${buyOutPoint.index}`);
 console.log("Sell Order Cell:", `${sellOutPoint.txHash}:${sellOutPoint.index}`);
 console.log("Matched token amount:", buy.amount.toString());
 console.log("Matched total price (shannons):", buy.price.toString());
 console.log("Seller receives (shannons):", sellerPayment.toString());
-console.log("Buyer token-cell capacity (shannons):", buyerTokenCapacity.toString());
-console.log("Fee reserve (shannons):", feeReserve.toString());
+console.log("Buyer token-cell capacity (shannons):", allocation.tokenCapacity.toString());
+console.log("Buyer refund inside token cell (shannons):", (allocation.tokenCapacity - minimumTokenCapacity).toString());
+console.log("Transaction fee (shannons):", allocation.fee.toString());
 console.log("Transaction inputs:", fillOrderTx.inputs.length);
 console.log("Transaction outputs:", fillOrderTx.outputs.length);
 

@@ -25,6 +25,11 @@ Each match consumes exactly one buy Order Cell and one sell Order Cell. The
 contract validates both sides. A maker can cancel an order by including a
 maker-locked input in a transaction that consumes only that one DEX Order Cell.
 
+The contract limits the buyer's CKB deduction beyond the agreed price
+to 10,000 shannons (0.0001 CKB). All capacity above that allowance must remain in
+the buyer's matching xUDT outputs. The bot and fill helper subtract the calculated
+network fee and put the rest in the buyer's xUDT Cell.
+
 ## Order lock arguments
 
 The current version uses exactly 90 bytes:
@@ -104,7 +109,7 @@ Flow:
    settlement transaction, and submits it. No maker signature is needed.
 4. Order state changes are ingested as events and pushed to the UI over
    WebSocket (market and maker channels), with an initial snapshot on subscribe.
-5. The chain, not the bot, enforces correctness through the lock and xUDT scripts.
+5. CKB validates the transaction through the DEX lock and xUDT scripts.
 
 Order statuses in the database: `DISCOVERED`, `LIVE`, `RESERVED`, `PENDING`,
 `SETTLEMENT_SUBMITTED`, `FILLED`, `CANCELED`/`CANCELLED`, `INVALID`, `ORPHANED`.
@@ -120,6 +125,7 @@ and Invalid.
 | `ui/` | Vite + React 19 trading UI using CCC wallet connector |
 | `faucet/` | Express service that drips test xUDT with a per-claim cooldown |
 | `offchain/` | CLI scripts: `issue-token`, `create-order`, `fill-order` |
+| `shared/` | Settlement capacity calculation used by the bot and fill helper |
 | `deployment/` | Deployed testnet script info (`scripts.json`) and system scripts |
 | `compose.yml` | Docker Compose for MongoDB, backend and faucet |
 | `weekly-progress-logs/` | Weekly progress reports |
@@ -184,7 +190,7 @@ Key environment variables:
 
 | Service | Variables |
 | --- | --- |
-| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKD_DEX_SCRIPT_CODE_HASH`, `CKB_DEX_SCRIPT_HASH_TYPE`, `CKB_DEX_SCRIPT_ARGS` |
+| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `CKB_DEX_SCRIPT_CODE_HASH`, `CKB_DEX_SCRIPT_HASH_TYPE`, `CKB_DEX_SCRIPT_ARGS` |
 | faucet | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `FAUCET_ISSUER_PRIVATE_KEY`, `FAUCET_DRIP_AMOUNT`, `FAUCET_COOLDOWN_HOURS` |
 | ui | `VITE_API_URL`, `VITE_WS_URL`, `VITE_CKB_RPC_URL`, `VITE_DEX_NETWORK`, `VITE_XUDT_ISSUER_LOCK_HASH`, `VITE_FAUCET_URL` |
 
@@ -214,7 +220,7 @@ UI: `npm run lint` and `npm run build`.
 
 ## Known limitations
 
-- Cancellation detected on-chain outside the bot's flow updates the database
-  directly rather than through event ingestion, so it triggers no live UI update.
+- Fills detected outside the bot's submission flow mark orders as filled but do
+  not create a trade record or emit a trade event.
 - The backend demo-mode fallback is non-functional.
 - No partial fills, market orders, or multi-order atomic matching.
