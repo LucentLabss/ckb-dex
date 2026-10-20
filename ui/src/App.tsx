@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
-import { Check, Copy, Moon, Sun } from "lucide-react";
+import { Check, Copy, LoaderCircle, Moon, RefreshCw, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
   buildCreateOrderTx,
@@ -264,13 +264,16 @@ function WalletApp() {
     CKB: 0,
     TOKEN: 0,
   });
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsChannelsRef = useRef<Set<string>>(new Set());
   const makerLockHashRef = useRef<string | null>(null);
+  const walletBalanceRequestsRef = useRef(0);
 
   const {
     signerInfo,
+    isOpen: isWalletConnectorOpen,
     open,
     close: closeConnector,
     disconnect,
@@ -350,7 +353,18 @@ function WalletApp() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [confirmOrder]);
 
+  function startWalletBalanceRequest() {
+    walletBalanceRequestsRef.current += 1;
+    setRefreshingBalance(true);
+  }
+
+  function finishWalletBalanceRequest() {
+    walletBalanceRequestsRef.current -= 1;
+    setRefreshingBalance(walletBalanceRequestsRef.current > 0);
+  }
+
   async function fetchWalletBalance(lock: ccc.Script) {
+    startWalletBalanceRequest();
     try {
       const ckbBalance = await client.getBalanceSingle(lock);
       let tokenBalance = 0n;
@@ -365,8 +379,12 @@ function WalletApp() {
         CKB: Number(ccc.fixedPointToString(ckbBalance)),
         TOKEN: Number(tokenBalance),
       });
+      return true;
     } catch {
       setWalletBalance({ CKB: 0, TOKEN: 0 });
+      return false;
+    } finally {
+      finishWalletBalanceRequest();
     }
   }
 
@@ -814,6 +832,22 @@ function WalletApp() {
     open();
   }
 
+  async function refreshWalletBalance() {
+    if (!signer || refreshingBalance) return;
+
+    startWalletBalanceRequest();
+    try {
+      const address = await signer.getRecommendedAddressObj();
+      if (!(await fetchWalletBalance(address.script))) {
+        showToast("Unable to refresh wallet balance");
+      }
+    } catch (error) {
+      showToast(formatError(error, "Unable to refresh wallet balance"));
+    } finally {
+      finishWalletBalanceRequest();
+    }
+  }
+
   function connectDevSigner() {
     setUseDevSigner(true);
     showToast("Using dev private key (devnet only)");
@@ -890,11 +924,20 @@ function WalletApp() {
               type="button"
               id="connectBtn"
               className={connected ? "connected" : ""}
+              disabled={isWalletConnectorOpen}
+              aria-busy={isWalletConnectorOpen}
               onClick={() => void toggleConnect()}
             >
-              {connected && walletAddress
-                ? shortAddress(walletAddress)
-                : "Connect wallet"}
+              {connected && walletAddress ? (
+                shortAddress(walletAddress)
+              ) : isWalletConnectorOpen ? (
+                <>
+                  <LoaderCircle className="loading-icon" size={14} />
+                  Connecting…
+                </>
+              ) : (
+                "Connect wallet"
+              )}
             </button>
             {connected && walletAddress ? (
               <button
@@ -1177,7 +1220,34 @@ function WalletApp() {
             </div>
 
             <div className="divider" />
-            <div className="panel-header small-header">Balances</div>
+            <div className="panel-header small-header">
+              <span>Balances</span>
+              {connected ? (
+                <button
+                  type="button"
+                  className="balance-refresh-btn"
+                  onClick={() => void refreshWalletBalance()}
+                  disabled={refreshingBalance}
+                  aria-busy={refreshingBalance}
+                  aria-label={
+                    refreshingBalance
+                      ? "Refreshing balances"
+                      : "Refresh balances"
+                  }
+                  title={
+                    refreshingBalance
+                      ? "Refreshing balances"
+                      : "Refresh balances"
+                  }
+                >
+                  <RefreshCw
+                    className={refreshingBalance ? "loading-icon" : ""}
+                    size={13}
+                  />
+                  {refreshingBalance ? "Refreshing…" : "Refresh"}
+                </button>
+              ) : null}
+            </div>
             <div id="balancesContent">
               {connected ? (
                 <>
