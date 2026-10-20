@@ -1,6 +1,5 @@
 import { ccc } from "@ckb-ccc/core";
-import dexScriptsJson from "../../deployment/scripts.json" with { type: "json" };
-import systemScriptsJson from "../../deployment/system-scripts.json" with { type: "json" };
+import { getDeployment, createDeploymentClient, verifyDeployment, assertSupportedAsset } from "../../shared/deployment.mjs";
 import { allocateSettlementCapacity } from "../../shared/settlement-capacity.mjs";
 
 const ORDER_VERSION = 1;
@@ -8,16 +7,6 @@ const SIDE_BUY = 0;
 const SIDE_SELL = 1;
 const ORDER_ARGS_LENGTH = 90;
 const FEE_RATE = 1_000n;
-
-interface DeploymentScript {
-  codeHash: string;
-  hashType: string;
-  cellDeps: { cellDep: ccc.CellDepLike }[];
-}
-
-interface SystemScriptEntry {
-  script: DeploymentScript;
-}
 
 interface OrderTerms {
   side: number;
@@ -90,26 +79,14 @@ async function findMakerLock(
   throw new Error(`No creation-transaction input matches maker lock hash ${makerLockHash}`);
 }
 
-const network = process.env.CKB_NETWORK ?? "devnet";
+const network = process.env.CKB_NETWORK ?? "testnet";
 const rpcUrl = process.env.CKB_RPC_URL;
 if (!rpcUrl) throw new Error("CKB_RPC_URL is missing from .env");
-
-const dexDeployment = (
-  dexScriptsJson as Record<string, Record<string, DeploymentScript | undefined>>
-)[network]?.["dex-order-lock"];
-if (!dexDeployment) {
-  throw new Error(`No dex-order-lock deployment found for network ${network}`);
-}
-
-const systemScripts = (
-  systemScriptsJson as Record<string, Record<string, SystemScriptEntry> | undefined>
-)[network];
-const xudtDeployment = systemScripts?.xudt?.script;
-if (!xudtDeployment) {
-  throw new Error(`No xUDT system script found for network ${network}`);
-}
-
-const client = new ccc.ClientPublicTestnet({ url: rpcUrl, fallbacks: [] });
+const deployment = getDeployment(network);
+const dexDeployment = deployment.dex;
+const xudtDeployment = deployment.knownScripts.XUdt;
+const client = createDeploymentClient(ccc, deployment, rpcUrl);
+await verifyDeployment(ccc, client, deployment);
 const buyOutPoint = readOutPoint("BUY");
 const sellOutPoint = readOutPoint("SELL");
 
@@ -146,6 +123,7 @@ if (buyCell.cellOutput.type) {
   throw new Error("A buy Order Cell must not have a type script");
 }
 const sellType = sellCell.cellOutput.type;
+if (sellType) assertSupportedAsset(ccc, deployment, sellType);
 if (!sellType || sellType.hash() !== sell.xudtTypeHash) {
   throw new Error("The sell Order Cell type script does not match its declared xUDT hash");
 }

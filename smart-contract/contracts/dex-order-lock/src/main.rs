@@ -49,6 +49,7 @@ const ERROR_BUYER_TOKEN_CAPACITY_OVERFLOW: i8 = -23;
 const ERROR_BUY_ORDER_CAPACITY: i8 = -24;
 const ERROR_BUY_ORDER_TYPE: i8 = -25;
 const ERROR_BUYER_CAPACITY_REFUND: i8 = -26;
+const ERROR_CANCELLATION_REFUND: i8 = -27;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct OrderArgs {
@@ -202,6 +203,35 @@ fn validate_buy_order(index: usize, order: OrderArgs) -> Result<(), i8> {
     Ok(())
 }
 
+fn validate_cancellation(order: OrderArgs) -> Result<(), i8> {
+    let capacity = load_cell_capacity(0, Source::GroupInput).map_err(|_| ERROR_LOAD_CAPACITY)?;
+    let type_hash = load_cell_type_hash(0, Source::GroupInput).map_err(|_| ERROR_LOAD_TYPE_HASH)?;
+    let data = load_cell_data(0, Source::GroupInput).map_err(|_| ERROR_LOAD_DATA)?;
+
+    // Preserve the actual cell contents, including any xUDT extension data.
+    // Cancellation fees must come from a separate input, not the order refund.
+    for (index, lock_hash) in QueryIter::new(load_cell_lock_hash, Source::Output).enumerate() {
+        if lock_hash != order.maker_lock_hash {
+            continue;
+        }
+        if load_cell_type_hash(index, Source::Output).map_err(|_| ERROR_LOAD_OUTPUT_TYPE_HASH)?
+            != type_hash
+        {
+            continue;
+        }
+        if load_cell_data(index, Source::Output).map_err(|_| ERROR_LOAD_DATA)? != data {
+            continue;
+        }
+        if load_cell_capacity(index, Source::Output).map_err(|_| ERROR_LOAD_OUTPUT_CAPACITY)?
+            >= capacity
+        {
+            return Ok(());
+        }
+    }
+
+    Err(ERROR_CANCELLATION_REFUND)
+}
+
 pub fn program_entry() -> i8 {
     let script = match ckb_std::high_level::load_script() {
         Ok(script) => script,
@@ -230,10 +260,12 @@ pub fn program_entry() -> i8 {
         .any(|lock_hash| lock_hash == own_order.maker_lock_hash);
 
     if maker_input_exists {
-        return if dex_input_count == 1 {
-            0
-        } else {
-            ERROR_DEX_INPUT_COUNT
+        if dex_input_count != 1 {
+            return ERROR_DEX_INPUT_COUNT;
+        }
+        return match validate_cancellation(own_order) {
+            Ok(()) => 0,
+            Err(code) => code,
         };
     }
 

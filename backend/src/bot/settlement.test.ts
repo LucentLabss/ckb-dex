@@ -30,6 +30,7 @@ function stubBot(buyCapacity: bigint) {
   // Exercise executeTrade with local chain/DB substitutes; no network or constructor config.
   const bot = Object.create(DexOrderBot.prototype) as DexOrderBot;
   Object.assign(bot, {
+    supportedAssetHashes: new Set([tokenType.hash()]),
     dexCellDeps: [{ outPoint: { txHash: `0x${"aa".repeat(32)}`, index: 0 }, depType: "code" }],
     xudtCellDeps: [{ outPoint: { txHash: `0x${"bb".repeat(32)}`, index: 0 }, depType: "code" }],
     reserve: async (id: string) => { reservations++; return id === "buy" ? buy : sell; },
@@ -66,6 +67,14 @@ for (const scenario of [
 test("bot rejects insufficient funding before reserving or submitting orders", async () => {
   const s = stubBot(price + minimumTokenCapacity);
   await assert.rejects(s.bot.executeTrade(s.buy, s.sell), /not carry enough capacity/);
+  assert.equal(s.reservationCount(), 0);
+  assert.equal(s.sent.length, 0);
+});
+
+test("bot rejects an unlisted asset before reserving or submitting orders", async () => {
+  const s = stubBot(price + minimumTokenCapacity + CKB);
+  Object.assign(s.bot, { supportedAssetHashes: new Set() });
+  await assert.rejects(s.bot.executeTrade(s.buy, s.sell), /not listed in the deployment manifest/);
   assert.equal(s.reservationCount(), 0);
   assert.equal(s.sent.length, 0);
 });

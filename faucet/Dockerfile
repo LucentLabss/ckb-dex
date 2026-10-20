@@ -6,6 +6,7 @@ RUN cd faucet && bun install --frozen-lockfile
 FROM deps AS build
 COPY faucet ./faucet
 COPY deployment ./deployment
+COPY shared ./shared
 RUN cd faucet && bun run build
 
 FROM node:22-alpine AS runtime
@@ -16,6 +17,7 @@ COPY --from=build /repo/faucet/dist ./dist
 COPY --from=build /repo/faucet/package.json ./
 COPY --from=build /repo/faucet/node_modules ./node_modules
 COPY --from=build /repo/deployment ../deployment
+COPY --from=build /repo/shared ../shared
 RUN addgroup -S app && adduser -S app -G app
 USER app
 EXPOSE 3100

@@ -81,7 +81,10 @@ groups and the xUDT type script to validate it.
 A cancellation transaction must contain exactly one DEX Order Cell input and
 at least one input whose lock script hash equals the maker lock hash in that
 order's args. The maker's own lock script authenticates that input. The DEX
-contract detects the maker input and allows the order to be consumed.
+contract also requires a refund output under the maker's lock, with the same
+type script and complete data as the consumed order and at least its full
+capacity. The refund can include extra capacity, but cannot be split across
+multiple cells. Cancellation fees come from another input, not the order refund.
 
 The DEX lock does not implement signature verification itself. It relies on
 the maker input's lock script to do that.
@@ -91,7 +94,8 @@ the maker input's lock script to do that.
 The contract checks these rules:
 
 1. The current order args use the supported 90-byte format, version, and side.
-2. Cancellation consumes exactly one DEX order and includes maker authorization.
+2. Cancellation consumes exactly one DEX order, includes maker authorization,
+   and returns the order's full capacity, type, and data in a maker-locked cell.
 3. Settlement consumes exactly one buy order and one sell order.
 4. Both orders declare the same xUDT type hash, amount, and total price.
 5. A sell Order Cell has the declared xUDT type and exact declared amount.
@@ -110,7 +114,9 @@ xUDT type hash. The seller's CKB payment can also be split across multiple
 plain CKB outputs under the seller's lock.
 
 The contract only compares the expected type script hash and token data. A
-production deployment must use a trusted xUDT type script. The unit tests use
+production deployment must use a trusted xUDT type script. Offchain components
+resolve the DEX, xUDT dependencies, and supported assets from
+`deployment/manifest.json` at the repository root. The unit tests use
 `always-success` scripts as mocks, which do not provide real asset protection.
 
 ## Error codes
@@ -142,6 +148,7 @@ production deployment must use a trusted xUDT type script. The unit tests use
 | `-24` | Buy order capacity is insufficient |
 | `-25` | Buy order input has a type script |
 | `-26` | Buyer's deduction beyond the price exceeds 10,000 shannons |
+| `-27` | Missing cancellation refund preserving the order's capacity, type, and data |
 
 ## Build and test
 

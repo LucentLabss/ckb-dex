@@ -8,7 +8,7 @@ const VALID_CKB_NETWORKS: CkbNetwork[] = ["devnet", "testnet", "mainnet"];
 
 function parseCkbNetwork(value: string | undefined): CkbNetwork {
   if (value == undefined || value.trim() === "") {
-    return "devnet";
+    return "testnet";
   }
   if (!VALID_CKB_NETWORKS.includes(value as CkbNetwork)) {
     throw new AppError(500, `Invalid CKB_NETWORK "${value}" (expected devnet, testnet or mainnet)`);

@@ -4,16 +4,14 @@ import assert from "node:assert/strict";
 import mongoose from "mongoose";
 import type { Config } from "../types/index.js";
 import DexOrderBot, { OrderDoc } from "./index.js";
-import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
+import { getDeployment } from "../../../shared/deployment.mjs";
 
-// Read from the "dex-order-lock" entry in deployment/scripts.json so the bot's
-// constructor can resolve its cell deps without touching the network.
-const dexDeployment = dexScriptsJson.testnet["dex-order-lock"];
+const dexDeployment = getDeployment("testnet").dex;
 
 const config: Config = {
   mongodbUrl: "mongodb://127.0.0.1:27017/test",
   ckbRpcUrl: "http://127.0.0.1:8114",
-  ckbNetwork: "devnet",
+  ckbNetwork: "testnet",
   enviroment: "development",
   dexOrderLockScript: {
     codeHash: dexDeployment.codeHash as `0x${string}`,

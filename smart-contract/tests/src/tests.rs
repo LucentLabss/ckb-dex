@@ -236,7 +236,11 @@ impl DexTestEnv {
         let sell_input = self.sell_order_input(sell_lock, TOKEN_AMOUNT);
         let mut outputs = vec![
             output(SELL_ORDER_CAPACITY + PRICE, seller_lock, None),
-            output(buyer_token_capacity, buyer_lock, Some(self.xudt_type.clone())),
+            output(
+                buyer_token_capacity,
+                buyer_lock,
+                Some(self.xudt_type.clone()),
+            ),
         ];
         let mut data = vec![Bytes::new(), token_data(TOKEN_AMOUNT)];
         if let Some(extra) = extra_output {
@@ -323,7 +327,8 @@ fn test_dex_exact_match_with_large_refund_in_buyer_token_cell_succeeds() {
         vec![Bytes::new(), token_data(TOKEN_AMOUNT)],
     );
 
-    env.context.verify_tx(&tx, MAX_CYCLES)
+    env.context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect("buyer token cell can hold the large CKB refund");
 }
 
@@ -346,7 +351,8 @@ fn test_dex_exact_match_with_refund_in_buyer_token_cell_succeeds() {
         vec![Bytes::new(), token_data(TOKEN_AMOUNT)],
     );
 
-    env.context.verify_tx(&tx, MAX_CYCLES)
+    env.context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect("buyer token cell can hold the small CKB refund");
 }
 
@@ -363,7 +369,10 @@ fn test_dex_buyer_refund_fee_cap_boundary() {
         if deduction <= MAX_SETTLEMENT_FEE {
             result.expect("zero deduction and the exact fee cap should pass");
         } else {
-            assert_validation_failure(result.expect_err("one shannon above the cap must fail"), -26);
+            assert_validation_failure(
+                result.expect_err("one shannon above the cap must fail"),
+                -26,
+            );
         }
     }
 }
@@ -376,7 +385,9 @@ fn test_dex_burning_the_old_buy_surplus_as_fee_fails() {
         BUYER_TOKEN_CAPACITY,
         None,
     );
-    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+    let error = env
+        .context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect_err("burning one CKB of buyer surplus must fail");
     assert_validation_failure(error, -26);
 }
@@ -391,7 +402,9 @@ fn test_dex_diverting_buyer_surplus_to_attacker_fails() {
         BUYER_TOKEN_CAPACITY,
         Some(attacker_output),
     );
-    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+    let error = env
+        .context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect_err("a small miner fee must not hide a large diversion to an attacker");
     assert_validation_failure(error, -26);
 }
@@ -406,7 +419,9 @@ fn test_dex_overpaying_seller_with_buyer_surplus_fails() {
         BUYER_TOKEN_CAPACITY,
         Some(seller_extra),
     );
-    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+    let error = env
+        .context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect_err("seller overpayment must not replace the buyer's refund");
     assert_validation_failure(error, -26);
 }
@@ -421,7 +436,9 @@ fn test_dex_plain_buyer_output_does_not_replace_token_cell_refund() {
         BUYER_TOKEN_CAPACITY,
         Some(plain_refund),
     );
-    let error = env.context.verify_tx(&tx, MAX_CYCLES)
+    let error = env
+        .context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect_err("the refund must remain in outputs carrying the buyer's expected xUDT");
     assert_validation_failure(error, -26);
 }
@@ -436,16 +453,25 @@ fn test_dex_buyer_refund_can_span_matching_token_outputs() {
         vec![buy_input, sell_input],
         vec![
             output(SELL_ORDER_CAPACITY + PRICE, env.seller_lock.clone(), None),
-            output(100 * CKB, env.buyer_lock.clone(), Some(env.xudt_type.clone())),
+            output(
+                100 * CKB,
+                env.buyer_lock.clone(),
+                Some(env.xudt_type.clone()),
+            ),
             output(
                 BUY_ORDER_CAPACITY - PRICE - 100 * CKB - fee,
                 env.buyer_lock.clone(),
                 Some(env.xudt_type.clone()),
             ),
         ],
-        vec![Bytes::new(), token_data(400), token_data(TOKEN_AMOUNT - 400)],
+        vec![
+            Bytes::new(),
+            token_data(400),
+            token_data(TOKEN_AMOUNT - 400),
+        ],
     );
-    env.context.verify_tx(&tx, MAX_CYCLES)
+    env.context
+        .verify_tx(&tx, MAX_CYCLES)
         .expect("sum the buyer's expected token outputs for both amount and refund");
 }
 
@@ -850,6 +876,113 @@ fn test_dex_buy_cancellation_succeeds_with_maker_authorization() {
         .verify_tx(&tx, MAX_CYCLES)
         .expect("buyer-authorized cancellation should pass");
     println!("successful buy cancellation cycles: {cycles}");
+}
+
+#[test]
+fn test_dex_cancellation_rejects_invalid_refunds() {
+    for side in [SIDE_BUY, SIDE_SELL] {
+        for defect in [
+            "wrong lock",
+            "wrong type",
+            "wrong data",
+            "underpaid",
+            "split",
+            "missing",
+        ] {
+            let mut env = DexTestEnv::new();
+            let maker = env.seller_lock.clone();
+            let lock = env.order_lock(side, &maker, TOKEN_AMOUNT, PRICE);
+            let (order_input, capacity, refund_type, data) = if side == SIDE_SELL {
+                (
+                    env.sell_order_input(lock, TOKEN_AMOUNT),
+                    SELL_ORDER_CAPACITY,
+                    Some(env.xudt_type.clone()),
+                    token_data(TOKEN_AMOUNT),
+                )
+            } else {
+                (
+                    env.buy_order_input(lock, BUY_ORDER_CAPACITY),
+                    BUY_ORDER_CAPACITY,
+                    None,
+                    Bytes::new(),
+                )
+            };
+            let authorization = env.authorization_input(maker.clone());
+            let lock = if defect == "wrong lock" {
+                env.attacker_lock.clone()
+            } else {
+                maker
+            };
+            let refund_type = if defect == "wrong type" {
+                Some(env.other_type.clone())
+            } else {
+                refund_type
+            };
+            let data = if defect == "wrong data" {
+                if side == SIDE_SELL {
+                    token_data(TOKEN_AMOUNT - 1)
+                } else {
+                    Bytes::from(vec![1])
+                }
+            } else {
+                data
+            };
+            let refund_capacity = if defect == "underpaid" {
+                capacity - 1
+            } else {
+                capacity
+            };
+            let (outputs, outputs_data) = match defect {
+                "split" => (
+                    vec![
+                        output(capacity / 2, lock.clone(), refund_type.clone()),
+                        output(capacity - capacity / 2, lock, refund_type),
+                    ],
+                    vec![data.clone(), data],
+                ),
+                "missing" => (vec![], vec![]),
+                _ => (vec![output(refund_capacity, lock, refund_type)], vec![data]),
+            };
+            let tx = env.transaction(vec![order_input, authorization], outputs, outputs_data);
+            let error = env
+                .context
+                .verify_tx(&tx, MAX_CYCLES)
+                .expect_err(&format!("side {side}: {defect} refund must fail"));
+            assert_validation_failure(error, -27);
+        }
+    }
+}
+
+#[test]
+fn test_dex_cancellation_preserves_extension_data_and_pays_fee_separately() {
+    let mut env = DexTestEnv::new();
+    let maker = env.seller_lock.clone();
+    let lock = env.order_lock(SIDE_SELL, &maker, TOKEN_AMOUNT, PRICE);
+    let mut data = TOKEN_AMOUNT.to_le_bytes().to_vec();
+    data.extend_from_slice(&[1, 2, 3, 4]);
+    let data = Bytes::from(data);
+    let order_input = env.create_input(
+        SELL_ORDER_CAPACITY,
+        lock,
+        Some(env.xudt_type.clone()),
+        data.clone(),
+    );
+    let authorization = env.authorization_input(maker.clone());
+    let tx = env.transaction(
+        vec![order_input, authorization],
+        vec![
+            output(
+                SELL_ORDER_CAPACITY,
+                maker.clone(),
+                Some(env.xudt_type.clone()),
+            ),
+            output(AUTHORIZATION_CAPACITY - 1_000, maker, None),
+        ],
+        vec![data, Bytes::new()],
+    );
+    env.context.verify_tx(&tx, MAX_CYCLES).expect(
+        "full refund with unchanged extension data and a separately funded fee should pass",
+    );
 }
 
 #[test]

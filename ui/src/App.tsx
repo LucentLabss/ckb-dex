@@ -9,12 +9,12 @@ import {
   SETTLEMENT_FEE_RESERVE,
   SIDE_BUY,
   SIDE_SELL,
-  systemScripts,
   xudtType,
   xudtTypeHash,
   type CancelableOrder,
 } from "./lib/dex";
 import "./App.css";
+import { ckbClient } from "./lib/client";
 
 type Side = "buy" | "sell";
 type OrderType = "limit" | "market";
@@ -126,20 +126,6 @@ const wsBase =
 const tradingPairLabel = xudtTypeHash ? "TOKEN / CKB" : "DEMO / CKB";
 const marketReady = Boolean(xudtTypeHash);
 const networkLabel = `${DEX_NETWORK.charAt(0).toUpperCase()}${DEX_NETWORK.slice(1)}`;
-
-// In dev the app always talks to the vite proxy at /api/ckb-rpc (the local CKB node has
-// no CORS headers of its own - see vite.config.ts). In a production build, fall back to a
-// directly reachable RPC URL if one was configured at build time.
-const ckbRpcUrl =
-  import.meta.env.DEV || !import.meta.env.VITE_CKB_RPC_URL
-    ? "/api/ckb-rpc"
-    : (import.meta.env.VITE_CKB_RPC_URL as string);
-
-const ckbClient = new ccc.ClientPublicTestnet({
-  url: ckbRpcUrl,
-  scripts: systemScripts,
-  fallbacks: [],
-});
 
 // Dev-only escape hatch: JoyID (and most hosted/extension wallets) can't represent a local
 // devnet identity - they're tied to real testnet/mainnet. This lets local devnet testing use
@@ -629,7 +615,7 @@ function WalletApp() {
   async function refreshMarketData() {
     if (!marketReady) {
       setApiError(
-        "No market token configured (set VITE_XUDT_ISSUER_LOCK_HASH). Showing local demo data.",
+        "No market token configured in the deployment manifest. Showing local demo data.",
       );
       return;
     }
@@ -680,7 +666,7 @@ function WalletApp() {
     }
 
     if (!marketReady) {
-      showToast("No market token configured — set VITE_XUDT_ISSUER_LOCK_HASH");
+      showToast("No market token configured in the deployment manifest");
       return;
     }
 

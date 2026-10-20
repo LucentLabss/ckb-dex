@@ -9,6 +9,8 @@ export let config: Config | undefined = undefined;
 
 (async function main() {
   config = await new AppConfiguration().getEnvironment();
+  const dexOrderBot = new DexOrderBot(config);
+  await dexOrderBot.init();
   const databaseConnection = new Database(config.mongodbUrl);
 
   /**Connect to database before any other server startup action */
@@ -28,7 +30,6 @@ export let config: Config | undefined = undefined;
   }
 
   //Start dex order bot
-  const dexOrderBot = new DexOrderBot(config);
   dexOrderBot.start();
 
   const shutdown = async (): Promise<void> => {

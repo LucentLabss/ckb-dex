@@ -24,6 +24,8 @@ Match:
 Each match consumes exactly one buy Order Cell and one sell Order Cell. The
 contract validates both sides. A maker can cancel an order by including a
 maker-locked input in a transaction that consumes only that one DEX Order Cell.
+Cancellation must return the order's full capacity, type script, and data in a
+maker-locked refund cell. Fees are funded separately.
 
 The contract limits the buyer's CKB deduction beyond the agreed price
 to 10,000 shannons (0.0001 CKB). All capacity above that allowance must remain in
@@ -125,8 +127,8 @@ and Invalid.
 | `ui/` | Vite + React 19 trading UI using CCC wallet connector |
 | `faucet/` | Express service that drips test xUDT with a per-claim cooldown |
 | `offchain/` | CLI scripts: `issue-token`, `create-order`, `fill-order` |
-| `shared/` | Settlement capacity calculation used by the bot and fill helper |
-| `deployment/` | Deployed testnet script info (`scripts.json`) and system scripts |
+| `shared/` | Deployment validation, client creation, and settlement capacity calculation |
+| `deployment/` | Runtime deployment manifest and deployment-tool artifacts |
 | `compose.yml` | Docker Compose for MongoDB, backend and faucet |
 | `weekly-progress-logs/` | Weekly progress reports |
 
@@ -159,7 +161,15 @@ The faucet exposes `GET /api/v1/health` and `POST /api/v1/claim` on port 3100.
 
 ## Deployed contracts (testnet)
 
-`deployment/scripts.json` holds the code hash, hash type and cell deps.
+`deployment/manifest.json` is the runtime source of truth for the UI, backend,
+faucet, and offchain scripts. It pins the network genesis hash, CCC client type,
+DEX and system scripts, dependency outpoints, and supported token identities.
+RPC URLs and private keys stay in environment variables. Startup checks reject
+a wrong chain, missing DEX/xUDT dependency cells, or mismatched script identities.
+Unconfigured networks are rejected; only testnet is currently listed.
+
+`scripts.json` and `system-scripts.json` remain deployment-tool artifacts, not
+runtime configuration. The manifest records the currently deployed contract:
 `dex-order-lock` uses code hash
 `0x8560b80bacb96bad676ce0c75b73ebf93e3a6fb06cda5cf3a89137f11018df3b`
 (`data2`).
@@ -190,9 +200,14 @@ Key environment variables:
 
 | Service | Variables |
 | --- | --- |
-| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `CKB_DEX_SCRIPT_CODE_HASH`, `CKB_DEX_SCRIPT_HASH_TYPE`, `CKB_DEX_SCRIPT_ARGS` |
-| faucet | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `FAUCET_ISSUER_PRIVATE_KEY`, `FAUCET_DRIP_AMOUNT`, `FAUCET_COOLDOWN_HOURS` |
-| ui | `VITE_API_URL`, `VITE_WS_URL`, `VITE_CKB_RPC_URL`, `VITE_DEX_NETWORK`, `VITE_XUDT_ISSUER_LOCK_HASH`, `VITE_FAUCET_URL` |
+| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK` |
+| faucet | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `FAUCET_ISSUER_PRIVATE_KEY`, `FAUCET_DRIP_AMOUNT`, `FAUCET_COOLDOWN_HOURS` |
+| ui | `VITE_API_URL`, `VITE_WS_URL`, `VITE_CKB_RPC_URL`, `VITE_DEX_NETWORK`, `VITE_FAUCET_URL` |
+
+The demo token's full identity is derived from the manifest's xUDT script and
+asset args. Token issuance requires that asset's issuer key; creating an order
+only requires the maker's key and funds. Legacy DEX/issuer environment settings
+are checked for conflicts rather than allowed to override the manifest.
 
 The backend needs MongoDB reachable at startup; its "demo mode" fallback does
 not work reliably yet.
