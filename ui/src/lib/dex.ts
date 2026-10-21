@@ -1,86 +1,20 @@
 import { ccc } from "@ckb-ccc/core";
-import scriptsJson from "../../../deployment/scripts.json";
-import systemScriptsJson from "../../../deployment/system-scripts.json";
+import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment } from "../../../shared/deployment.mjs";
 
 export type Hex = `0x${string}`;
 
-interface DeploymentScriptEntry {
-  codeHash: string;
-  hashType: string;
-  cellDeps: { cellDep: ccc.CellDepLike }[];
+export const DEX_NETWORK = (import.meta.env.VITE_DEX_NETWORK as string | undefined) ?? "testnet";
+export const deployment = getDeployment(DEX_NETWORK);
+const dexDeployment = deployment.dex;
+const xudtDeployment = deployment.knownScripts.XUdt;
+
+export function createDexClient(url: string): ccc.Client {
+  return createDeploymentClient(ccc, deployment, url);
 }
 
-// `offckb system-scripts --export-style ccc` shape: nested by network, each script keyed
-// by its own snake_case name under a `.script` sub-object.
-interface OffckbScriptEntry {
-  name: string;
-  script: DeploymentScriptEntry;
+export async function verifyDexClient(client: ccc.Client): Promise<void> {
+  await verifyDeployment(ccc, client, deployment);
 }
-
-// Maps offckb's snake_case script names to ccc's KnownScript names.
-const KNOWN_SCRIPT_NAME_MAP: Record<string, ccc.KnownScript> = {
-  secp256k1_blake160_sighash_all: ccc.KnownScript.Secp256k1Blake160,
-  secp256k1_blake160_multisig_all: ccc.KnownScript.Secp256k1Multisig,
-  dao: ccc.KnownScript.NervosDao,
-  sudt: ccc.KnownScript.SUdt,
-  xudt: ccc.KnownScript.XUdt,
-  omnilock: ccc.KnownScript.OmniLock,
-  anyone_can_pay: ccc.KnownScript.AnyoneCanPay,
-  nostr_lock: ccc.KnownScript.NostrLock,
-  type_id: ccc.KnownScript.TypeId,
-};
-
-export const DEX_NETWORK = (import.meta.env.VITE_DEX_NETWORK as string | undefined) ?? "devnet";
-
-const dexDeployment = (
-  scriptsJson as Record<string, Record<string, DeploymentScriptEntry | undefined>>
-)[DEX_NETWORK]?.["dex-order-lock"];
-
-if (!dexDeployment) {
-  throw new Error(
-    `No dex-order-lock deployment found for network "${DEX_NETWORK}" in deployment/scripts.json`,
-  );
-}
-
-const systemScriptsForNetwork = (
-  systemScriptsJson as Record<string, Record<string, OffckbScriptEntry> | undefined>
-)[DEX_NETWORK];
-
-if (!systemScriptsForNetwork) {
-  throw new Error(
-    `No system-scripts entries for network "${DEX_NETWORK}" in deployment/system-scripts.json`,
-  );
-}
-
-const xudtEntry = systemScriptsForNetwork.xudt;
-if (!xudtEntry) {
-  throw new Error(`No "xudt" system-script entry for network "${DEX_NETWORK}"`);
-}
-const xudtDeployment = xudtEntry.script;
-
-// Only devnet needs a custom `scripts` override for the CKB client - ccc's
-// ClientPublicTestnet already ships a complete, accurate built-in registry for testnet
-// (TESTNET_SCRIPTS) covering everything, including wallet-bridging locks like PWLock and
-// JoyID that offckb doesn't export at all. Overriding wholesale for testnet would silently
-// drop any script we didn't hand-map, breaking wallets that need it (see the "No script
-// information was found for PWLock on ckt" error connecting MetaMask). On mainnet ccc has
-// its own built-in registry too, so the same reasoning applies there.
-export const systemScripts: Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined> | undefined =
-  DEX_NETWORK === "devnet"
-    ? (() => {
-        const known: Record<string, ccc.ScriptInfoLike> = {};
-        for (const [snakeName, entry] of Object.entries(systemScriptsForNetwork)) {
-          const knownName = KNOWN_SCRIPT_NAME_MAP[snakeName];
-          if (!knownName) continue;
-          known[knownName] = {
-            codeHash: entry.script.codeHash,
-            hashType: entry.script.hashType,
-            cellDeps: entry.script.cellDeps,
-          };
-        }
-        return known as unknown as Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined>;
-      })()
-    : undefined;
 
 export const dexCellDeps: ccc.CellDepLike[] = dexDeployment.cellDeps.map(({ cellDep }) => cellDep);
 export const xudtCellDeps: ccc.CellDepLike[] = xudtDeployment.cellDeps.map(({ cellDep }) => cellDep);
@@ -90,16 +24,12 @@ export const dexScript = {
   hashType: dexDeployment.hashType as ccc.HashTypeLike,
 };
 
-// The demo token's xUDT args are `issuerLockHash(32) + 0x00000000` (see offchain/src/issue-token.ts).
-const issuerLockHash = import.meta.env.VITE_XUDT_ISSUER_LOCK_HASH as string | undefined;
-
-export const xudtType: ccc.Script | undefined = issuerLockHash
-  ? ccc.Script.from({
-      codeHash: xudtDeployment.codeHash as Hex,
-      hashType: xudtDeployment.hashType as ccc.HashTypeLike,
-      args: ccc.hexFrom(ccc.bytesConcat(ccc.bytesFrom(issuerLockHash), new Uint8Array(4))),
-    })
-  : undefined;
+export const xudtType = ccc.Script.from(getAssetType(deployment));
+// Reject stale issuer overrides instead of silently pointing at a different market.
+const issuerOverride = import.meta.env.VITE_XUDT_ISSUER_LOCK_HASH as string | undefined;
+if (issuerOverride && issuerOverride !== ccc.hexFrom(ccc.bytesFrom(xudtType.args).slice(0, 32))) {
+  throw new Error("VITE_XUDT_ISSUER_LOCK_HASH conflicts with the deployment manifest");
+}
 
 export const xudtTypeHash: Hex | undefined = xudtType?.hash() as Hex | undefined;
 
@@ -151,10 +81,11 @@ export async function buildCreateOrderTx(params: {
   totalPrice: bigint;
 }): Promise<ccc.Transaction> {
   if (!xudtType || !xudtTypeHash) {
-    throw new Error("No market token configured (set VITE_XUDT_ISSUER_LOCK_HASH)");
+    throw new Error("No market token configured in the deployment manifest");
   }
 
   const { signer, client, side, tokenAmount, totalPrice } = params;
+  await verifyDexClient(client);
   const makerAddress = await signer.getRecommendedAddressObj();
   const makerLock = makerAddress.script;
   const makerLockHash = makerLock.hash() as Hex;
@@ -220,10 +151,9 @@ export interface CancelableOrder {
 }
 
 /**
- * Cancels a live order cell. The dex-order-lock treats the spend as authorized once one
- * of the tx's other inputs carries the maker's own lock hash (see program_entry in
- * main.rs) - ensured explicitly below, since completeInputsByCapacity won't add one if
- * the order's own capacity already covers the output and fee.
+ * Returns the order's full capacity and assets to its maker. A separate maker input
+ * authorizes cancellation and funds the fee. The contract checks both authorization
+ * and the refund; completeInputsByCapacity alone does not guarantee authorization.
  */
 export async function buildCancelOrderTx(params: {
   signer: ccc.Signer;
@@ -231,6 +161,7 @@ export async function buildCancelOrderTx(params: {
   order: CancelableOrder;
 }): Promise<ccc.Transaction> {
   const { signer, client, order } = params;
+  await verifyDexClient(client);
   const makerAddress = await signer.getRecommendedAddressObj();
   const makerLockHash = makerAddress.script.hash() as Hex;
 

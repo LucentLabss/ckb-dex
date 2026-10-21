@@ -2,73 +2,7 @@ import { ccc } from "@ckb-ccc/core";
 import FaucetClaim from "../models/claim.js";
 import AppError from "./error.js";
 import { Config, Hex } from "../types.js";
-import systemScriptsJson from "../../../deployment/system-scripts.json" with { type: "json" };
-
-interface DeploymentScriptEntry {
-  codeHash: string;
-  hashType: string;
-  cellDeps: { cellDep: ccc.CellDepLike }[];
-}
-
-/**
- * `offckb system-scripts --export-style ccc` output shape: nested by network, each script
- * keyed by its own snake_case name (not ccc's KnownScript names), with codeHash/hashType/
- * cellDeps under a `.script` sub-object rather than at the top level.
- */
-interface OffckbScriptEntry {
-  name: string;
-  script: DeploymentScriptEntry;
-}
-
-// The handful of well-known scripts this app actually touches, mapped from offckb's
-// snake_case names to ccc's KnownScript names. Extend as needed - anything not listed
-// here is simply left out of the flat `scripts` override passed to the CKB client.
-const KNOWN_SCRIPT_NAME_MAP: Record<string, ccc.KnownScript> = {
-  secp256k1_blake160_sighash_all: ccc.KnownScript.Secp256k1Blake160,
-  secp256k1_blake160_multisig_all: ccc.KnownScript.Secp256k1Multisig,
-  dao: ccc.KnownScript.NervosDao,
-  sudt: ccc.KnownScript.SUdt,
-  xudt: ccc.KnownScript.XUdt,
-  omnilock: ccc.KnownScript.OmniLock,
-  anyone_can_pay: ccc.KnownScript.AnyoneCanPay,
-  nostr_lock: ccc.KnownScript.NostrLock,
-  type_id: ccc.KnownScript.TypeId,
-};
-
-/** Reads deployment/system-scripts.json's bucket for `network`, translated for ccc's client. */
-function resolveNetworkScripts(network: string): {
-  known: Record<string, ccc.ScriptInfoLike>;
-  raw: Record<string, OffckbScriptEntry>;
-} {
-  const raw = (systemScriptsJson as Record<string, Record<string, OffckbScriptEntry> | undefined>)[
-    network
-  ];
-  if (!raw) {
-    throw new AppError(500, `No system-scripts entries for network "${network}"`);
-  }
-
-  const known: Record<string, ccc.ScriptInfoLike> = {};
-  for (const [snakeName, entry] of Object.entries(raw)) {
-    const knownName = KNOWN_SCRIPT_NAME_MAP[snakeName];
-    if (!knownName) continue;
-    known[knownName] = {
-      codeHash: entry.script.codeHash,
-      hashType: entry.script.hashType,
-      // ScriptInfoLike.cellDeps wants the wrapped {cellDep}[] form - same shape the JSON
-      // already has, unlike tx.addCellDeps() below which wants it unwrapped.
-      cellDeps: entry.script.cellDeps,
-    };
-  }
-  return { known, raw };
-}
-
-function resolveXudtCellDeps(raw: Record<string, OffckbScriptEntry>, network: string): ccc.CellDepLike[] {
-  const xudt = raw.xudt;
-  if (!xudt) {
-    throw new AppError(500, `No "xudt" system-script entry for network "${network}"`);
-  }
-  return xudt.script.cellDeps.map(({ cellDep }) => cellDep);
-}
+import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment } from "../../../shared/deployment.mjs";
 
 /**
  * A standalone drip faucet for the demo xUDT token. Mints fresh supply on every claim
@@ -82,8 +16,6 @@ export default class TokenFaucet {
   private readonly client: ccc.Client;
   private readonly signer: ccc.SignerCkbPrivateKey;
   private readonly xudtCellDeps: ccc.CellDepLike[];
-  private readonly xudtCodeHash: Hex;
-  private readonly xudtHashType: ccc.HashTypeLike;
 
   private issuerLock: ccc.Script | undefined;
   private issuerLockHash: Hex | undefined;
@@ -91,29 +23,27 @@ export default class TokenFaucet {
   constructor(config: Config) {
     this.config = config;
 
-    const { known, raw } = resolveNetworkScripts(config.ckbNetwork);
-
-    this.client = new ccc.ClientPublicTestnet({
-      url: config.ckbRpcUrl,
-      scripts: known as unknown as Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined>,
-    });
-
-    this.signer = new ccc.SignerCkbPrivateKey(this.client, config.issuerPrivateKey);
-    this.xudtCellDeps = resolveXudtCellDeps(raw, config.ckbNetwork);
-
-    const xudt = raw.xudt;
-    if (!xudt) {
-      throw new AppError(500, `No "xudt" system-script entry for network "${config.ckbNetwork}"`);
+    const deployment = getDeployment(config.ckbNetwork);
+    if (deployment.network === "mainnet") {
+      throw new Error("The demo faucet is not available on mainnet");
     }
-    this.xudtCodeHash = xudt.script.codeHash as Hex;
-    this.xudtHashType = xudt.script.hashType as ccc.HashTypeLike;
+    this.client = createDeploymentClient(ccc, deployment, config.ckbRpcUrl);
+    this.signer = new ccc.SignerCkbPrivateKey(this.client, config.issuerPrivateKey);
+    const xudt = deployment.knownScripts.XUdt;
+    this.xudtCellDeps = xudt.cellDeps.map(({ cellDep }) => cellDep);
   }
 
-  /** Resolves and logs the issuer identity - the value ui/.env's VITE_XUDT_ISSUER_LOCK_HASH must match. */
+  /** Verify the chain and issuer against the shared deployment before serving claims. */
   async init(): Promise<void> {
+    await verifyDeployment(ccc, this.client, getDeployment(this.config.ckbNetwork));
     const address = await this.signer.getAddressObjSecp256k1();
     this.issuerLock = address.script;
     this.issuerLockHash = this.issuerLock.hash() as Hex;
+    const expectedType = getAssetType(getDeployment(this.config.ckbNetwork));
+    const expectedIssuer = ccc.hexFrom(ccc.bytesFrom(expectedType.args).slice(0, 32));
+    if (this.issuerLockHash !== expectedIssuer) {
+      throw new Error("Faucet issuer does not match the manifest token issuer");
+    }
 
     const balance = await this.client.getBalanceSingle(this.issuerLock);
 
@@ -126,11 +56,7 @@ export default class TokenFaucet {
     if (!this.issuerLockHash) {
       throw new AppError(500, "TokenFaucet.init() must run before serving claims");
     }
-    return ccc.Script.from({
-      codeHash: this.xudtCodeHash,
-      hashType: this.xudtHashType,
-      args: ccc.hexFrom(ccc.bytesConcat(ccc.bytesFrom(this.issuerLockHash), new Uint8Array(4))),
-    });
+    return ccc.Script.from(getAssetType(getDeployment(this.config.ckbNetwork)));
   }
 
   /**

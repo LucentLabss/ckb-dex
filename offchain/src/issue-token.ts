@@ -8,6 +8,11 @@ import {
   xudtType,
 } from "./shared.js";
 
+const expectedIssuer = ccc.hexFrom(ccc.bytesFrom(xudtType.args).slice(0, 32));
+if (makerLock.hash() !== expectedIssuer) {
+  throw new Error("MAKER_PRIVATE_KEY does not belong to the manifest token issuer");
+}
+
 const issueTx = ccc.Transaction.from({
   outputs: [
     {

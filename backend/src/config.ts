@@ -2,6 +2,7 @@
 import AppError from "./services/error.js";
 import { Config, AppConfig, NODE_ENV, Hex, HashType, CkbNetwork } from "./types/index.js";
 import * as dotenv from "dotenv";
+import { getDeployment, assertDexConfiguration } from "../../shared/deployment.mjs";
 
 dotenv.config();
 
@@ -9,12 +10,11 @@ const VALID_HASH_TYPES: HashType[] = ["data", "type", "data1", "data2"];
 const VALID_CKB_NETWORKS: CkbNetwork[] = ["devnet", "testnet", "mainnet"];
 const DEFAULT_CONFIG = {
     mongodbUrl: "mongodb://127.0.0.1:27017/ckb-dex",
-    ckbRpcUrl: "http://127.0.0.1:8114",
+    ckbRpcUrl: "https://testnet.ckb.dev",
     internalBotToken: "dev-internal-bot-token",
     port: 3000,
     apiVersion: 1,
     enviroment: "development" as const,
-    dexScriptCodeHash: `0x${"11".repeat(32)}` as Hex,
     dexScriptHashType: "type" as const,
     dexScriptArgs: "0x" as Hex,
 };
@@ -73,7 +73,7 @@ function parseHashType(name: string, value: string | undefined): HashType {
 
 function parseCkbNetwork(value: string | undefined): CkbNetwork {
     if (value == undefined || value.trim() === "") {
-        return "devnet";
+        return "testnet";
     }
 
     if (!VALID_CKB_NETWORKS.includes(value as CkbNetwork)) {
@@ -95,16 +95,26 @@ export default class AppConfiguration implements AppConfig {
             throw (new AppError(500, "Unable to access OS environment variables"));
         }
 
-        const dexScriptCodeHash = envs.CKB_DEX_SCRIPT_CODE_HASH ?? envs.CKD_DEX_SCRIPT_CODE_HASH ?? DEFAULT_CONFIG.dexScriptCodeHash;
+        const network = parseCkbNetwork(envs.CKB_NETWORK);
+        const deployment = getDeployment(network);
+        const dexOrderLockScript = {
+            codeHash: deployment.dex.codeHash,
+            hashType: deployment.dex.hashType,
+            args: "0x" as Hex,
+        };
+        // Legacy env values may match, but may not override the manifest.
+        assertDexConfiguration(deployment, {
+            codeHash: (envs.CKB_DEX_SCRIPT_CODE_HASH ?? envs.CKD_DEX_SCRIPT_CODE_HASH ?? deployment.dex.codeHash) as Hex,
+            hashType: envs.CKB_DEX_SCRIPT_HASH_TYPE
+                ? parseHashType("CKB_DEX_SCRIPT_HASH_TYPE", envs.CKB_DEX_SCRIPT_HASH_TYPE)
+                : deployment.dex.hashType,
+            args: (envs.CKB_DEX_SCRIPT_ARGS ?? "0x") as Hex,
+        });
 
         this.config = {
             mongodbUrl: requireEnv("MONGO_DB_URL", envs.MONGO_DB_URL, DEFAULT_CONFIG.mongodbUrl),
-            dexOrderLockScript: {
-                codeHash: requireEnv("CKB_DEX_SCRIPT_CODE_HASH", dexScriptCodeHash, DEFAULT_CONFIG.dexScriptCodeHash) as Hex,
-                hashType: parseHashType("CKB_DEX_SCRIPT_HASH_TYPE", envs.CKB_DEX_SCRIPT_HASH_TYPE),
-                args: requireEnv("CKB_DEX_SCRIPT_ARGS", envs.CKB_DEX_SCRIPT_ARGS, DEFAULT_CONFIG.dexScriptArgs) as Hex,
-            },
-            ckbNetwork: parseCkbNetwork(envs.CKB_NETWORK),
+            dexOrderLockScript,
+            ckbNetwork: network,
             enviroment: parseNodeEnv(envs.NODE_ENV),
             port: parseInteger("PORT", envs.PORT, DEFAULT_CONFIG.port),
             ckbRpcUrl: requireEnv("CKB_RPC_URL", envs.CKB_RPC_URL, DEFAULT_CONFIG.ckbRpcUrl),

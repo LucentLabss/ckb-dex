@@ -7,8 +7,8 @@ import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
 import { EventIngestionService } from "../services/event-ingestion.js";
 import { toBuffer, toHex } from "../utils/index.js";
-import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
-import systemScriptsJson from "../../../deployment/system-scripts.json" with { type: "json" };
+import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment, assertDexConfiguration } from "../../../shared/deployment.mjs";
+import { allocateSettlementCapacity } from "../../../shared/settlement-capacity.mjs";
 
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
@@ -72,88 +72,6 @@ function decodeDexOrderArgs(args: Hex): DecodedDexOrderArgs {
   };
 }
 
-interface DeploymentScriptEntry {
-  codeHash: string;
-  hashType: string;
-  cellDeps: { cellDep: ccc.CellDepLike }[];
-}
-
-/** Finds the deployment record (any network bucket) whose script matches the configured DEX lock. */
-function resolveDexCellDeps(dexOrderLockScript: Script): ccc.CellDepLike[] {
-  const networks = Object.values(
-    dexScriptsJson as Record<string, Record<string, DeploymentScriptEntry | undefined>>,
-  );
-
-  for (const network of networks) {
-    const entry = network["dex-order-lock"];
-    if (
-      entry &&
-      entry.codeHash === dexOrderLockScript.codeHash &&
-      entry.hashType === dexOrderLockScript.hashType
-    ) {
-      return entry.cellDeps.map(({ cellDep }) => cellDep);
-    }
-  }
-
-  throw new AppError(
-    500,
-    "No deployment cell deps found for the configured DEX order lock script",
-  );
-}
-
-// `offckb system-scripts --export-style ccc` shape: nested by network, each script keyed
-// by its own snake_case name under a `.script` sub-object.
-interface OffckbScriptEntry {
-  name: string;
-  script: DeploymentScriptEntry;
-}
-
-// Maps offckb's snake_case script names to ccc's KnownScript names.
-const KNOWN_SCRIPT_NAME_MAP: Record<string, ccc.KnownScript> = {
-  secp256k1_blake160_sighash_all: ccc.KnownScript.Secp256k1Blake160,
-  secp256k1_blake160_multisig_all: ccc.KnownScript.Secp256k1Multisig,
-  dao: ccc.KnownScript.NervosDao,
-  sudt: ccc.KnownScript.SUdt,
-  xudt: ccc.KnownScript.XUdt,
-  omnilock: ccc.KnownScript.OmniLock,
-  anyone_can_pay: ccc.KnownScript.AnyoneCanPay,
-  nostr_lock: ccc.KnownScript.NostrLock,
-  type_id: ccc.KnownScript.TypeId,
-};
-
-/** Reads deployment/system-scripts.json's bucket for `network`, translated for ccc's client. */
-function resolveNetworkScripts(network: string): {
-  known: Record<string, ccc.ScriptInfoLike>;
-  raw: Record<string, OffckbScriptEntry>;
-} {
-  const raw = (systemScriptsJson as Record<string, Record<string, OffckbScriptEntry> | undefined>)[
-    network
-  ];
-  if (!raw) {
-    throw new AppError(500, `No system-scripts entries for network "${network}"`);
-  }
-
-  const known: Record<string, ccc.ScriptInfoLike> = {};
-  for (const [snakeName, entry] of Object.entries(raw)) {
-    const knownName = KNOWN_SCRIPT_NAME_MAP[snakeName];
-    if (!knownName) continue;
-    known[knownName] = {
-      codeHash: entry.script.codeHash,
-      hashType: entry.script.hashType,
-      cellDeps: entry.script.cellDeps,
-    };
-  }
-  return { known, raw };
-}
-
-function resolveXudtCellDeps(raw: Record<string, OffckbScriptEntry>, network: string): ccc.CellDepLike[] {
-  const xudt = raw.xudt;
-  if (!xudt) {
-    throw new AppError(500, `No "xudt" system-script entry for network "${network}"`);
-  }
-  return xudt.script.cellDeps.map(({ cellDep }) => cellDep);
-}
-
 interface DexOrderBotTrait {
   readonly config: Config;
   readonly pollInterval: number;
@@ -184,6 +102,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly client: ccc.Client;
   private readonly dexCellDeps: ccc.CellDepLike[];
   private readonly xudtCellDeps: ccc.CellDepLike[];
+  private readonly supportedAssetHashes: Set<string>;
   private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
@@ -194,18 +113,17 @@ export default class DexOrderBot implements DexOrderBotTrait {
     this.config = config;
     this.pollInterval = pollInterval;
 
-    const { known, raw } = resolveNetworkScripts(config.ckbNetwork);
+    const deployment = getDeployment(config.ckbNetwork);
+    assertDexConfiguration(deployment, config.dexOrderLockScript);
+    this.client = createDeploymentClient(ccc, deployment, config.ckbRpcUrl);
+    this.dexCellDeps = deployment.dex.cellDeps.map(({ cellDep }) => cellDep);
+    this.xudtCellDeps = deployment.knownScripts.XUdt.cellDeps.map(({ cellDep }) => cellDep);
+    this.supportedAssetHashes = new Set(deployment.assets.map((asset) =>
+      ccc.Script.from(getAssetType(deployment, asset.id)).hash()));
+  }
 
-    this.client = new ccc.ClientPublicTestnet({
-      url: config.ckbRpcUrl,
-      scripts: known as unknown as Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined>,
-      // Without this, ClientPublicTestnet falls back to public testnet.ckb.dev/ckbapp.dev
-      // on any RPC hiccup instead of failing fast.
-      fallbacks: [],
-    });
-
-    this.dexCellDeps = resolveDexCellDeps(config.dexOrderLockScript);
-    this.xudtCellDeps = resolveXudtCellDeps(raw, config.ckbNetwork);
+  async init(): Promise<void> {
+    await verifyDeployment(ccc, this.client, getDeployment(this.config.ckbNetwork));
   }
 
   get pendingPairOrders(): OrderDoc[] {
@@ -218,6 +136,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const tick = async () => {
       try {
+        await this.init();
         await this.scanForPendingOrders();
         await this.sweepTrackedOrders();
         await this.retryFailSwaps();
@@ -338,6 +257,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
    * No signer needed - the lock script has no signature check, only structural rules.
    */
   async executeTrade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex> {
+    if (!this.supportedAssetHashes.has(buyOrder.xudtTypeHash as string)) {
+      throw new AppError(400, "Token type is not listed in the deployment manifest");
+    }
     if (buyOrder.direction !== "BID" || sellOrder.direction !== "ASK") {
       throw new AppError(400, "executeTrade requires a BID (buy) order and an ASK (sell) order");
     }
@@ -376,17 +298,23 @@ export default class DexOrderBot implements DexOrderBotTrait {
       outputsData: ["0x", sellOrder.cellData as Hex],
     });
 
-    // The seller must be paid capacity + price exactly (validate_sell_order rejects less),
-    // so the fee can only come from surplus on the buy order's own capacity.
-    const buyerTokenCapacity = tx.outputs[1].capacity;
-    const fee = tx.estimateFee(SETTLEMENT_FEE_RATE) + 5_000n;
-    const buyCapacity = BigInt(buyOrder.capacity);
-    if (buyCapacity < price + buyerTokenCapacity + fee) {
+    // Include dependencies before measuring the final transaction size and fee.
+    tx.addCellDeps(this.dexCellDeps);
+    tx.addCellDeps(this.xudtCellDeps);
+    const allocation = allocateSettlementCapacity({
+      buyCapacity: BigInt(buyOrder.capacity),
+      price,
+      minimumTokenCapacity: tx.outputs[1].capacity,
+      fee: tx.estimateFee(SETTLEMENT_FEE_RATE),
+    });
+    if (!allocation) {
       throw new AppError(
         409,
         `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell + the network fee`,
       );
     }
+
+    tx.outputs[1].capacity = allocation.tokenCapacity;
 
     const reservedBuy = await this.reserve(buyOrder._id!);
     if (!reservedBuy) {
@@ -407,9 +335,6 @@ export default class DexOrderBot implements DexOrderBotTrait {
       if (!buyStillLive || !sellStillLive) {
         throw new AppError(409, "one of the matched orders was already settled on-chain");
       }
-
-      tx.addCellDeps(this.dexCellDeps);
-      tx.addCellDeps(this.xudtCellDeps);
 
       const txHash = await this.client.sendTransaction(tx);
 
@@ -585,6 +510,11 @@ export default class DexOrderBot implements DexOrderBotTrait {
       decoded = this.deserializeLockScriptAndArgs(cell.cellOutput.lock);
     } catch (err) {
       console.warn(`skipping dex order cell ${id}: ${(err as Error).message}`);
+      return undefined;
+    }
+
+    if (!this.supportedAssetHashes.has(decoded.udtTypeHash)) {
+      console.warn(`skipping dex order cell ${id}: unsupported manifest asset`);
       return undefined;
     }
 

@@ -21,6 +21,8 @@ const ORDER_ARGS_LEN: usize = 90;
 const ORDER_VERSION: u8 = 1;
 const SIDE_BUY: u8 = 0;
 const SIDE_SELL: u8 = 1;
+// Maximum CKB the buyer may lose beyond the agreed price: 0.0001 CKB.
+const MAX_SETTLEMENT_FEE: u64 = 10_000;
 
 const ERROR_LOAD_SCRIPT: i8 = -1;
 const ERROR_ARGS_LENGTH: i8 = -2;
@@ -46,6 +48,8 @@ const ERROR_TOKEN_AMOUNT_OVERFLOW: i8 = -22;
 const ERROR_BUYER_TOKEN_CAPACITY_OVERFLOW: i8 = -23;
 const ERROR_BUY_ORDER_CAPACITY: i8 = -24;
 const ERROR_BUY_ORDER_TYPE: i8 = -25;
+const ERROR_BUYER_CAPACITY_REFUND: i8 = -26;
+const ERROR_CANCELLATION_REFUND: i8 = -27;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct OrderArgs {
@@ -187,11 +191,45 @@ fn validate_buy_order(index: usize, order: OrderArgs) -> Result<(), i8> {
         .checked_add(buyer_token_capacity)
         .ok_or(ERROR_CAPACITY_OVERFLOW)?;
 
-    if buy_order_capacity < required_buy_capacity {
-        return Err(ERROR_BUY_ORDER_CAPACITY);
+    let unreturned_capacity = buy_order_capacity
+        .checked_sub(required_buy_capacity)
+        .ok_or(ERROR_BUY_ORDER_CAPACITY)?;
+
+    // Bound the deduction even when it is diverted to another output instead of a miner.
+    if unreturned_capacity > MAX_SETTLEMENT_FEE {
+        return Err(ERROR_BUYER_CAPACITY_REFUND);
     }
 
     Ok(())
+}
+
+fn validate_cancellation(order: OrderArgs) -> Result<(), i8> {
+    let capacity = load_cell_capacity(0, Source::GroupInput).map_err(|_| ERROR_LOAD_CAPACITY)?;
+    let type_hash = load_cell_type_hash(0, Source::GroupInput).map_err(|_| ERROR_LOAD_TYPE_HASH)?;
+    let data = load_cell_data(0, Source::GroupInput).map_err(|_| ERROR_LOAD_DATA)?;
+
+    // Preserve the actual cell contents, including any xUDT extension data.
+    // Cancellation fees must come from a separate input, not the order refund.
+    for (index, lock_hash) in QueryIter::new(load_cell_lock_hash, Source::Output).enumerate() {
+        if lock_hash != order.maker_lock_hash {
+            continue;
+        }
+        if load_cell_type_hash(index, Source::Output).map_err(|_| ERROR_LOAD_OUTPUT_TYPE_HASH)?
+            != type_hash
+        {
+            continue;
+        }
+        if load_cell_data(index, Source::Output).map_err(|_| ERROR_LOAD_DATA)? != data {
+            continue;
+        }
+        if load_cell_capacity(index, Source::Output).map_err(|_| ERROR_LOAD_OUTPUT_CAPACITY)?
+            >= capacity
+        {
+            return Ok(());
+        }
+    }
+
+    Err(ERROR_CANCELLATION_REFUND)
 }
 
 pub fn program_entry() -> i8 {
@@ -222,10 +260,12 @@ pub fn program_entry() -> i8 {
         .any(|lock_hash| lock_hash == own_order.maker_lock_hash);
 
     if maker_input_exists {
-        return if dex_input_count == 1 {
-            0
-        } else {
-            ERROR_DEX_INPUT_COUNT
+        if dex_input_count != 1 {
+            return ERROR_DEX_INPUT_COUNT;
+        }
+        return match validate_cancellation(own_order) {
+            Ok(()) => 0,
+            Err(code) => code,
         };
     }
 

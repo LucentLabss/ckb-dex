@@ -1,6 +1,6 @@
 export type Hex = `0x${string}`;
 
-/** Which bucket of deployment/system-scripts.json to read. */
+/** Which network entry in deployment/manifest.json to use. */
 export type CkbNetwork = "devnet" | "testnet" | "mainnet";
 
 export interface Config {

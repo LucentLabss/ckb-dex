@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import AppConfiguration from "./config.js";
 import { createExpressServer } from "./app.js";
+import { getDeployment } from "../../shared/deployment.mjs";
 
 const withEnvOverrides = async <T>(overrides: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> => {
   const original = { ...process.env };
@@ -23,10 +24,12 @@ const withEnvOverrides = async <T>(overrides: Record<string, string | undefined>
   }
 };
 
-test("AppConfiguration falls back to safe defaults for local development", async () => {
+test("AppConfiguration defaults to the manifest's testnet deployment", async () => {
   await withEnvOverrides(
     {
       MONGO_DB_URL: undefined,
+      CKB_NETWORK: undefined,
+      CKD_DEX_SCRIPT_CODE_HASH: undefined,
       CKB_DEX_SCRIPT_CODE_HASH: undefined,
       CKB_DEX_SCRIPT_HASH_TYPE: undefined,
       CKB_DEX_SCRIPT_ARGS: undefined,
@@ -44,12 +47,25 @@ test("AppConfiguration falls back to safe defaults for local development", async
       assert.equal(config.apiVersion, 1);
       assert.equal(config.enviroment, "development");
       assert.equal(config.internalBotToken, "dev-internal-bot-token");
-      assert.equal(config.ckbRpcUrl, "http://127.0.0.1:8114");
-      assert.equal(config.dexOrderLockScript.codeHash.length, 66);
-      assert.equal(config.dexOrderLockScript.hashType, "type");
+      assert.equal(config.ckbNetwork, "testnet");
+      assert.equal(config.ckbRpcUrl, "https://testnet.ckb.dev");
+      assert.equal(config.dexOrderLockScript.codeHash, getDeployment("testnet").dex.codeHash);
+      assert.equal(config.dexOrderLockScript.hashType, getDeployment("testnet").dex.hashType);
       assert.equal(config.dexOrderLockScript.args, "0x");
     },
   );
+});
+
+test("AppConfiguration rejects a legacy DEX override that disagrees with the manifest", async () => {
+  await withEnvOverrides({ CKB_NETWORK: "testnet", CKB_DEX_SCRIPT_CODE_HASH: `0x${"11".repeat(32)}` }, async () => {
+    await assert.rejects(new AppConfiguration().getEnvironment(), /conflicts/);
+  });
+});
+
+test("AppConfiguration rejects a network without a deployment", async () => {
+  await withEnvOverrides({ CKB_NETWORK: "devnet" }, async () => {
+    await assert.rejects(new AppConfiguration().getEnvironment(), /No deployment manifest/);
+  });
 });
 
 test("Server health and readiness endpoints respond correctly", async () => {

@@ -6,8 +6,9 @@
   "scripts": {
     "issue-token": "tsx --env-file=.env src/issue-token.ts",
     "create-order": "tsx --env-file=.env src/create-order.ts",
+    "fill-order": "tsx --env-file=.env src/fill-order.ts",
     "check": "tsc --noEmit",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsx --test src/*.test.ts"
   },
   "keywords": [],
   "author": "",
