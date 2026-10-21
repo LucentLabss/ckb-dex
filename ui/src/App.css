@@ -178,6 +178,10 @@ select {
 }
 
 #connectBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   background: var(--accent);
   color: #fff;
   border: none;
@@ -195,6 +199,22 @@ select {
 
 #connectBtn:hover {
   opacity: 0.9;
+}
+
+#connectBtn:disabled {
+  cursor: wait;
+  opacity: 0.85;
+}
+
+.loading-icon {
+  flex: 0 0 auto;
+  animation: loading-spin 0.9s linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .wallet-controls {
@@ -672,6 +692,16 @@ select {
   color: var(--text-primary);
 }
 
+.faucet-button {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  margin-right: 12px;
+  padding: 9px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .field {
   margin-bottom: 10px;
 }
@@ -863,6 +893,29 @@ select {
   padding: 0 0 10px;
   border: none;
   font-size: 12px;
+}
+
+.balance-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.balance-refresh-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.balance-refresh-btn:disabled {
+  cursor: wait;
+  opacity: 0.8;
 }
 
 .market-panel-body {
@@ -1076,7 +1129,8 @@ tbody tr:last-child td {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-block {
+  .skeleton-block,
+  .loading-icon {
     animation: none;
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
+import { Check, Copy, LoaderCircle, Moon, RefreshCw, Sun } from "lucide-react";
 import { Check, Copy, Moon, RefreshCw, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
@@ -22,18 +23,42 @@ type TabMode = "open" | "history";
 // The backend's real lifecycle (see backend/src/models/order.ts's OrderStatus) collapsed to
 // what's useful to show a trader. "Broadcasting" is local-only: the create/cancel tx was sent
 // but the bot hasn't indexed it yet, so the backend doesn't know about it at all.
-type OrderStatus = "Broadcasting" | "Open" | "Matched" | "Submitted" | "Filled" | "Cancelled" | "Invalid";
+type OrderStatus =
+  | "Broadcasting"
+  | "Open"
+  | "Matched"
+  | "Submitted"
+  | "Filled"
+  | "Cancelled"
+  | "Invalid";
 
-const OPEN_STATUSES: ReadonlySet<OrderStatus> = new Set(["Broadcasting", "Open", "Matched", "Submitted"]);
+const OPEN_STATUSES: ReadonlySet<OrderStatus> = new Set([
+  "Broadcasting",
+  "Open",
+  "Matched",
+  "Submitted",
+]);
 
 const STATUS_META: Record<OrderStatus, { label: string; hint: string }> = {
-  Broadcasting: { label: "Broadcasting", hint: "Transaction sent — waiting for the bot to pick it up" },
+  Broadcasting: {
+    label: "Broadcasting",
+    hint: "Transaction sent — waiting for the bot to pick it up",
+  },
   Open: { label: "Open", hint: "Resting in the order book, not yet matched" },
-  Matched: { label: "Matched", hint: "Paired with a counter-order — settlement is about to be submitted" },
-  Submitted: { label: "Submitted", hint: "Settlement transaction sent — waiting for on-chain confirmation" },
+  Matched: {
+    label: "Matched",
+    hint: "Paired with a counter-order — settlement is about to be submitted",
+  },
+  Submitted: {
+    label: "Submitted",
+    hint: "Settlement transaction sent — waiting for on-chain confirmation",
+  },
   Filled: { label: "Filled", hint: "Trade confirmed on-chain" },
   Cancelled: { label: "Cancelled", hint: "Order was cancelled" },
-  Invalid: { label: "Invalid", hint: "No longer valid (e.g. underfunded, or orphaned by a chain reorg)" },
+  Invalid: {
+    label: "Invalid",
+    hint: "No longer valid (e.g. underfunded, or orphaned by a chain reorg)",
+  },
 };
 
 type MarketRow = {
@@ -199,13 +224,22 @@ function WalletApp() {
   // Fixture data is only ever shown in the no-market-configured demo mode (see
   // `marketReady` below) - a real, configured market starts empty and stays that way
   // until real data arrives, so "no orders yet" is never confused with demo content.
-  const [marketAsks, setMarketAsks] = useState<MarketRow[]>(marketReady ? [] : fixtureAsks);
-  const [marketBids, setMarketBids] = useState<MarketRow[]>(marketReady ? [] : fixtureBids);
-  const [trades, setTrades] = useState<TradeEntry[]>(marketReady ? [] : fixtureTrades);
+  const [marketAsks, setMarketAsks] = useState<MarketRow[]>(
+    marketReady ? [] : fixtureAsks,
+  );
+  const [marketBids, setMarketBids] = useState<MarketRow[]>(
+    marketReady ? [] : fixtureBids,
+  );
+  const [trades, setTrades] = useState<TradeEntry[]>(
+    marketReady ? [] : fixtureTrades,
+  );
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [addressCopied, setAddressCopied] = useState(false);
   const [makerLockHash, setMakerLockHash] = useState<string | null>(null);
-  const [walletBalance, setWalletBalance] = useState<{ CKB: number; TOKEN: number }>({
+  const [walletBalance, setWalletBalance] = useState<{
+    CKB: number;
+    TOKEN: number;
+  }>({
     CKB: 0,
     TOKEN: 0,
   });
@@ -216,11 +250,22 @@ function WalletApp() {
   const wsRef = useRef<WebSocket | null>(null);
   const wsChannelsRef = useRef<Set<string>>(new Set());
   const makerLockHashRef = useRef<string | null>(null);
+  const walletBalanceRequestsRef = useRef(0);
 
-  const { signerInfo, open, close: closeConnector, disconnect, client } = useCcc();
+  const {
+    signerInfo,
+    isOpen: isWalletConnectorOpen,
+    open,
+    close: closeConnector,
+    disconnect,
+    client,
+  } = useCcc();
   const [useDevSigner, setUseDevSigner] = useState(false);
   const devSigner = useMemo(
-    () => (devPrivateKey ? new ccc.SignerCkbPrivateKey(client, devPrivateKey) : undefined),
+    () =>
+      devPrivateKey
+        ? new ccc.SignerCkbPrivateKey(client, devPrivateKey)
+        : undefined,
     [client],
   );
   const signer = useDevSigner ? devSigner : signerInfo?.signer;
@@ -301,7 +346,18 @@ function WalletApp() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [confirmOrder]);
 
+  function startWalletBalanceRequest() {
+    walletBalanceRequestsRef.current += 1;
+    setRefreshingBalance(true);
+  }
+
+  function finishWalletBalanceRequest() {
+    walletBalanceRequestsRef.current -= 1;
+    setRefreshingBalance(walletBalanceRequestsRef.current > 0);
+  }
+
   async function fetchWalletBalance(lock: ccc.Script) {
+    startWalletBalanceRequest();
     try {
       const ckbBalance = await client.getBalanceSingle(lock);
       let tokenBalance = 0n;
@@ -316,8 +372,12 @@ function WalletApp() {
         CKB: Number(ccc.fixedPointToString(ckbBalance)),
         TOKEN: Number(tokenBalance),
       });
+      return true;
     } catch {
       setWalletBalance({ CKB: 0, TOKEN: 0 });
+      return false;
+    } finally {
+      finishWalletBalanceRequest();
     }
   }
 
@@ -403,7 +463,10 @@ function WalletApp() {
         setWsConnected(true);
         stopPolling();
 
-        const channels = [`market:${xudtTypeHash}:orderbook`, `market:${xudtTypeHash}:trades`];
+        const channels = [
+          `market:${xudtTypeHash}:orderbook`,
+          `market:${xudtTypeHash}:trades`,
+        ];
         if (makerLockHashRef.current) {
           channels.push(`maker:${makerLockHashRef.current}:orders`);
         }
@@ -473,7 +536,9 @@ function WalletApp() {
     // Pending (local) entries win over the server's version of the same id - the server
     // may simply not know about the action yet (e.g. the bot hasn't indexed/matched it).
     for (const order of pendingOrders) byId.set(order.id, order);
-    return Array.from(byId.values()).sort((a, b) => b.time.getTime() - a.time.getTime());
+    return Array.from(byId.values()).sort(
+      (a, b) => b.time.getTime() - a.time.getTime(),
+    );
   }, [serverOrders, pendingOrders]);
 
   const openOrders = useMemo(
@@ -486,7 +551,9 @@ function WalletApp() {
   );
 
   function wsSubscribe(channels: string[]) {
-    const toAdd = channels.filter((channel) => !wsChannelsRef.current.has(channel));
+    const toAdd = channels.filter(
+      (channel) => !wsChannelsRef.current.has(channel),
+    );
     if (toAdd.length === 0) return;
     toAdd.forEach((channel) => wsChannelsRef.current.add(channel));
 
@@ -501,7 +568,12 @@ function WalletApp() {
     channel?: string;
     data?: unknown;
   }) {
-    if (message.type === "error" || !message.channel || !Array.isArray(message.data)) return;
+    if (
+      message.type === "error" ||
+      !message.channel ||
+      !Array.isArray(message.data)
+    )
+      return;
 
     if (message.channel.endsWith(":orderbook")) {
       // Apply the pushed book as-is, including a legitimately empty one (e.g. right after
@@ -515,12 +587,18 @@ function WalletApp() {
       return;
     }
 
-    if (message.channel.startsWith("market:") && message.channel.endsWith(":trades")) {
+    if (
+      message.channel.startsWith("market:") &&
+      message.channel.endsWith(":trades")
+    ) {
       setTrades(normalizeTrades(message.data as ApiTradeItem[]));
       return;
     }
 
-    if (message.channel.startsWith("maker:") && message.channel.endsWith(":orders")) {
+    if (
+      message.channel.startsWith("maker:") &&
+      message.channel.endsWith(":orders")
+    ) {
       applyMyOrders(message.data as ApiOrderItem[]);
     }
   }
@@ -580,10 +658,16 @@ function WalletApp() {
   const spread = bestAsk - bestBid;
 
   const totalValue = useMemo(() => {
-    const priceValue = orderType === "limit" ? Number.parseFloat(priceInput) : midPrice;
+    const priceValue =
+      orderType === "limit" ? Number.parseFloat(priceInput) : midPrice;
     const amountValue = Number.parseFloat(amountInput);
 
-    if (!priceValue || !amountValue || Number.isNaN(priceValue) || Number.isNaN(amountValue)) {
+    if (
+      !priceValue ||
+      !amountValue ||
+      Number.isNaN(priceValue) ||
+      Number.isNaN(amountValue)
+    ) {
       return 0;
     }
 
@@ -614,11 +698,14 @@ function WalletApp() {
     }
 
     const priceValue =
-      orderType === "limit" ? Number.parseFloat(priceInput) || midPrice : midPrice;
+      orderType === "limit"
+        ? Number.parseFloat(priceInput) || midPrice
+        : midPrice;
 
     let amount = 0;
     if (side === "buy") {
-      amount = priceValue > 0 ? (walletBalance.CKB * percent) / 100 / priceValue : 0;
+      amount =
+        priceValue > 0 ? (walletBalance.CKB * percent) / 100 / priceValue : 0;
     } else {
       amount = (walletBalance.TOKEN * percent) / 100;
     }
@@ -643,7 +730,9 @@ function WalletApp() {
       ]);
 
       if (!orderBookResponse.ok) {
-        throw new Error(`Order book request failed (${orderBookResponse.status})`);
+        throw new Error(
+          `Order book request failed (${orderBookResponse.status})`,
+        );
       }
 
       const orderBookPayload = await orderBookResponse.json();
@@ -652,7 +741,9 @@ function WalletApp() {
       // Apply the fetched book/trades as-is, including a genuinely empty result - masking
       // "no live orders yet" with fixture data made a real empty book indistinguishable
       // from a loading or broken one (see the same fix already applied to the websocket path).
-      const mappedBook = normalizeOrderBook(orderBookPayload?.data?.items ?? []);
+      const mappedBook = normalizeOrderBook(
+        orderBookPayload?.data?.items ?? [],
+      );
       setMarketAsks(mappedBook.asks);
       setMarketBids(mappedBook.bids);
       setTrades(normalizeTrades(tradePayload?.data?.items ?? []));
@@ -660,7 +751,9 @@ function WalletApp() {
     } catch (error) {
       // Leave whatever's currently on screen (real or empty) rather than overwriting it with
       // fixture data - the banner above already explains the fetch failed.
-      setApiError(formatError(error, "Unable to reach the backend market service."));
+      setApiError(
+        formatError(error, "Unable to reach the backend market service."),
+      );
     } finally {
       setLoadingMarket(false);
     }
@@ -708,7 +801,9 @@ function WalletApp() {
     setSubmitting(true);
     try {
       const tokenAmount = BigInt(pending.amount);
-      const totalPrice = ccc.fixedPointFrom((pending.priceValue * pending.amount).toFixed(8));
+      const totalPrice = ccc.fixedPointFrom(
+        (pending.priceValue * pending.amount).toFixed(8),
+      );
 
       const tx = await buildCreateOrderTx({
         signer,
@@ -719,13 +814,22 @@ function WalletApp() {
       });
 
       const txHash = await signer.sendTransaction(tx);
-      showToast(`${pending.side === "buy" ? "Buy" : "Sell"} order submitted — ${shortHash(txHash)}`);
+      showToast(
+        `${pending.side === "buy" ? "Buy" : "Sell"} order submitted — ${shortHash(txHash)}`,
+      );
       setAmountInput("");
 
       const ownerLock = (await signer.getRecommendedAddressObj()).script;
       void fetchWalletBalance(ownerLock);
       setPendingOrders((previous) => [
-        buildOptimisticOrder({ txHash, side: pending.side, tokenAmount, totalPrice, tx, ownerLock }),
+        buildOptimisticOrder({
+          txHash,
+          side: pending.side,
+          tokenAmount,
+          totalPrice,
+          tx,
+          ownerLock,
+        }),
         ...previous,
       ]);
       if (makerLockHash) void refreshMyOrders(makerLockHash);
@@ -777,6 +881,22 @@ function WalletApp() {
     open();
   }
 
+  async function refreshWalletBalance() {
+    if (!signer || refreshingBalance) return;
+
+    startWalletBalanceRequest();
+    try {
+      const address = await signer.getRecommendedAddressObj();
+      if (!(await fetchWalletBalance(address.script))) {
+        showToast("Unable to refresh wallet balance");
+      }
+    } catch (error) {
+      showToast(formatError(error, "Unable to refresh wallet balance"));
+    } finally {
+      finishWalletBalanceRequest();
+    }
+  }
+
   function connectDevSigner() {
     setUseDevSigner(true);
     showToast("Using dev private key (devnet only)");
@@ -822,8 +942,19 @@ function WalletApp() {
         <div className="header-right">
           <button
             type="button"
+            className="faucet-button"
+            onClick={() => window.open("https://faucet.nervos.org", "_blank")}
+          >
+            CKB FAUCET
+          </button>
+          <button
+            type="button"
             className="theme-toggle-btn"
-            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            title={
+              theme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
             aria-label="Toggle color theme"
             onClick={toggleTheme}
           >
@@ -866,9 +997,20 @@ function WalletApp() {
               type="button"
               id="connectBtn"
               className={connected ? "connected" : ""}
+              disabled={isWalletConnectorOpen}
+              aria-busy={isWalletConnectorOpen}
               onClick={() => void toggleConnect()}
             >
-              {connected && walletAddress ? shortAddress(walletAddress) : "Connect wallet"}
+              {connected && walletAddress ? (
+                shortAddress(walletAddress)
+              ) : isWalletConnectorOpen ? (
+                <>
+                  <LoaderCircle className="loading-icon" size={14} />
+                  Connecting…
+                </>
+              ) : (
+                "Connect wallet"
+              )}
             </button>
             {connected && walletAddress ? (
               <button
@@ -941,7 +1083,9 @@ function WalletApp() {
                   >
                     <div
                       className="depth-bar"
-                      style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
+                      style={{
+                        width: `${((row.cumulative ?? 0) / maxDepth) * 100}%`,
+                      }}
                     />
                     <span className="mono red book-col-price">{fmtPrice(row.price)}</span>
                     <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
@@ -954,7 +1098,8 @@ function WalletApp() {
             <div className="spread-row">
               <span className="mono mid">{fmtPrice(midPrice)}</span>
               <span className="label">
-                Spread {fmtPrice(spread)} ({((spread / midPrice) * 100).toFixed(2)}%)
+                Spread {fmtPrice(spread)} (
+                {((spread / midPrice) * 100).toFixed(2)}%)
               </span>
             </div>
 
@@ -977,7 +1122,9 @@ function WalletApp() {
                   >
                     <div
                       className="depth-bar"
-                      style={{ width: `${((row.cumulative ?? 0) / maxDepth) * 100}%` }}
+                      style={{
+                        width: `${((row.cumulative ?? 0) / maxDepth) * 100}%`,
+                      }}
                     />
                     <span className="mono green book-col-price">{fmtPrice(row.price)}</span>
                     <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
@@ -1018,13 +1165,14 @@ function WalletApp() {
               >
                 Buy
               </button>
-              <button
+              {/* <button
                 type="button"
-                className={side === "sell" ? "active sell" : "sell"}
-                onClick={() => setOrderSide("sell")}
+                disabled
+                className="disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => setOrderTypeValue("market")}
               >
-                Sell
-              </button>
+                Market
+              </button> */}
             </div>
 
             <div className="field">
@@ -1059,7 +1207,11 @@ function WalletApp() {
 
             <div className="pct-row">
               {[25, 50, 75, 100].map((percent) => (
-                <button key={percent} type="button" onClick={() => quickPercent(percent)}>
+                <button
+                  key={percent}
+                  type="button"
+                  onClick={() => quickPercent(percent)}
+                >
                   {percent}%
                 </button>
               ))}
@@ -1117,32 +1269,48 @@ function WalletApp() {
               ) : trades.length === 0 ? (
                 <p className="book-empty">No trades yet</p>
               ) : (
-                trades.slice(0, 2).map((trade) => (
-                <div key={`${trade.hash}-${trade.time}`} className="trade-row">
-                  <span className={`trade-side ${trade.side}`}>
-                    {trade.side === "buy" ? "Buy" : "Sell"}
-                  </span>
-                  <span className="mono">{trade.price}</span>
-                  <span className="mono muted">{trade.amount}</span>
-                  <span className="muted">{trade.time}</span>
-                </div>
+                trades.map((trade) => (
+                  <div
+                    key={`${trade.hash}-${trade.time}`}
+                    className="trade-row"
+                  >
+                    <span className={`trade-side ${trade.side}`}>
+                      {trade.side === "buy" ? "Buy" : "Sell"}
+                    </span>
+                    <span className="mono">{trade.price}</span>
+                    <span className="mono muted">{trade.amount}</span>
+                    <span className="muted">{trade.time}</span>
+                  </div>
                 ))
               )}
             </div>
 
             <div className="divider" />
             <div className="panel-header small-header">
-              Balances
+              <span>Balances</span>
               {connected ? (
                 <button
                   type="button"
-                  className="refresh-balance-btn"
-                  title="Refresh balance"
-                  aria-label="Refresh balance"
-                  disabled={refreshingBalance}
+                  className="balance-refresh-btn"
                   onClick={() => void refreshWalletBalance()}
+                  disabled={refreshingBalance}
+                  aria-busy={refreshingBalance}
+                  aria-label={
+                    refreshingBalance
+                      ? "Refreshing balances"
+                      : "Refresh balances"
+                  }
+                  title={
+                    refreshingBalance
+                      ? "Refreshing balances"
+                      : "Refresh balances"
+                  }
                 >
-                  <RefreshCw size={13} className={refreshingBalance ? "spin" : ""} />
+                  <RefreshCw
+                    className={refreshingBalance ? "loading-icon" : ""}
+                    size={13}
+                  />
+                  {refreshingBalance ? "Refreshing…" : "Refresh"}
                 </button>
               ) : null}
             </div>
@@ -1151,11 +1319,15 @@ function WalletApp() {
                 <>
                   <div className="balance-row">
                     <span className="secondary">TOKEN</span>
-                    <span className="mono amt">{fmtAmount(walletBalance.TOKEN)}</span>
+                    <span className="mono amt">
+                      {fmtAmount(walletBalance.TOKEN)}
+                    </span>
                   </div>
                   <div className="balance-row">
                     <span className="secondary">CKB</span>
-                    <span className="mono amt">{fmtCkb(walletBalance.CKB)}</span>
+                    <span className="mono amt">
+                      {fmtCkb(walletBalance.CKB)}
+                    </span>
                   </div>
                 </>
               ) : (
@@ -1202,19 +1374,26 @@ function WalletApp() {
                 <tbody>
                   {!connected ? (
                     <tr className="empty-row">
-                      <td colSpan={9}>Connect your wallet to see your open orders</td>
+                      <td colSpan={9}>
+                        Connect your wallet to see your open orders
+                      </td>
                     </tr>
                   ) : loadingMyOrders && openOrders.length === 0 ? (
                     <OrderRowSkeleton columns={9} rows={2} />
                   ) : openOrders.length === 0 ? (
                     <tr className="empty-row">
-                      <td colSpan={9}>No open orders — place a buy or sell order to get started</td>
+                      <td colSpan={9}>
+                        No open orders — place a buy or sell order to get
+                        started
+                      </td>
                     </tr>
                   ) : (
                     openOrders.map((order) => (
                       <tr key={order.id}>
                         <td>{tradingPairLabel}</td>
-                        <td className={`side-tag ${order.side === "buy" ? "green" : "red"}`}>
+                        <td
+                          className={`side-tag ${order.side === "buy" ? "green" : "red"}`}
+                        >
                           {order.side === "buy" ? "Buy" : "Sell"}
                         </td>
                         <td className="secondary">
@@ -1261,7 +1440,9 @@ function WalletApp() {
                 <tbody>
                   {!connected ? (
                     <tr className="empty-row">
-                      <td colSpan={8}>Connect your wallet to see your order history</td>
+                      <td colSpan={8}>
+                        Connect your wallet to see your order history
+                      </td>
                     </tr>
                   ) : loadingMyOrders && history.length === 0 ? (
                     <OrderRowSkeleton columns={8} rows={2} />
@@ -1273,7 +1454,9 @@ function WalletApp() {
                     history.map((order) => (
                       <tr key={`${order.id}-${order.status}`}>
                         <td>{tradingPairLabel}</td>
-                        <td className={`side-tag ${order.side === "buy" ? "green" : "red"}`}>
+                        <td
+                          className={`side-tag ${order.side === "buy" ? "green" : "red"}`}
+                        >
                           {order.side === "buy" ? "Buy" : "Sell"}
                         </td>
                         <td className="secondary">
@@ -1325,11 +1508,15 @@ function WalletApp() {
               </div>
               <div className="modal-row">
                 <span className="secondary">Price</span>
-                <span className="mono">{fmtPrice(confirmOrder.priceValue)} CKB</span>
+                <span className="mono">
+                  {fmtPrice(confirmOrder.priceValue)} CKB
+                </span>
               </div>
               <div className="modal-row">
                 <span className="secondary">Amount</span>
-                <span className="mono">{fmtAmount(confirmOrder.amount)} TOKEN</span>
+                <span className="mono">
+                  {fmtAmount(confirmOrder.amount)} TOKEN
+                </span>
               </div>
               <div className="modal-row modal-row-total">
                 <span className="secondary">Total</span>
@@ -1338,12 +1525,18 @@ function WalletApp() {
             </div>
             {confirmOrder.side === "buy" ? (
               <p className="modal-note">
-                A small network fee reserve ({ccc.fixedPointToString(SETTLEMENT_FEE_RESERVE)} CKB)
-                is added on top of the total so the bot can settle the trade once it's matched.
+                A small network fee reserve (
+                {ccc.fixedPointToString(SETTLEMENT_FEE_RESERVE)} CKB) is added
+                on top of the total so the bot can settle the trade once it's
+                matched.
               </p>
             ) : null}
             <div className="modal-actions">
-              <button type="button" className="modal-btn-secondary" onClick={() => setConfirmOrder(null)}>
+              <button
+                type="button"
+                className="modal-btn-secondary"
+                onClick={() => setConfirmOrder(null)}
+              >
                 Cancel
               </button>
               <button
@@ -1358,7 +1551,9 @@ function WalletApp() {
         </div>
       ) : null}
 
-      <div id="toastHost">{toast ? <div className="toast">{toast}</div> : null}</div>
+      <div id="toastHost">
+        {toast ? <div className="toast">{toast}</div> : null}
+      </div>
     </div>
   );
 }
@@ -1402,7 +1597,13 @@ function TradeRowSkeleton({ rows }: { rows: number }) {
 }
 
 /** Placeholder rows shown while the first fetch for a table is still in flight. */
-function OrderRowSkeleton({ columns, rows }: { columns: number; rows: number }) {
+function OrderRowSkeleton({
+  columns,
+  rows,
+}: {
+  columns: number;
+  rows: number;
+}) {
   return (
     <>
       {Array.from({ length: rows }, (_, rowIndex) => (
@@ -1465,7 +1666,8 @@ function buildOptimisticOrder(params: {
   const amount = Number(tokenAmount);
   const totalCkb = Number(ccc.fixedPointToString(totalPrice));
   const price = amount > 0 ? totalCkb / amount : totalCkb;
-  const direction: CancelableOrder["direction"] = side === "sell" ? "ASK" : "BID";
+  const direction: CancelableOrder["direction"] =
+    side === "sell" ? "ASK" : "BID";
   const ownerLockLike = {
     codeHash: ownerLock.codeHash,
     hashType: ownerLock.hashType,
@@ -1486,20 +1688,22 @@ function buildOptimisticOrder(params: {
       direction,
       capacity: tx.outputs[0].capacity.toString(),
       ownerLock: ownerLockLike,
-      typeScript: direction === "ASK" && xudtType
-        ? ({
-            codeHash: xudtType.codeHash,
-            hashType: xudtType.hashType,
-            args: xudtType.args,
-          } as CancelableOrder["typeScript"])
-        : undefined,
+      typeScript:
+        direction === "ASK" && xudtType
+          ? ({
+              codeHash: xudtType.codeHash,
+              hashType: xudtType.hashType,
+              args: xudtType.args,
+            } as CancelableOrder["typeScript"])
+          : undefined,
       cellData: tx.outputsData[0] as CancelableOrder["cellData"],
     },
   };
 }
 
 function mapApiOrder(doc: ApiOrderItem): Order {
-  const amount = Number.parseFloat(doc.tokenAmount ?? doc.remainingAmount ?? "0") || 0;
+  const amount =
+    Number.parseFloat(doc.tokenAmount ?? doc.remainingAmount ?? "0") || 0;
   const totalCkb = shannonsToCkb(doc.pricePerToken);
   const price = amount > 0 ? totalCkb / amount : totalCkb;
 
@@ -1513,7 +1717,11 @@ function mapApiOrder(doc: ApiOrderItem): Order {
     time: doc.createdAt ? new Date(doc.createdAt) : new Date(),
     status: mapOrderStatus(doc.status),
     raw:
-      doc.outPoint && doc.direction && doc.capacity && doc.ownerLock && doc.cellData
+      doc.outPoint &&
+      doc.direction &&
+      doc.capacity &&
+      doc.ownerLock &&
+      doc.cellData
         ? {
             outPoint: doc.outPoint as CancelableOrder["outPoint"],
             direction: doc.direction,
@@ -1530,7 +1738,8 @@ function normalizeOrderBook(items: ApiOrderItem[]) {
   const asks = items
     .filter((item) => item.direction === "ASK")
     .map((item) => {
-      const amount = Number.parseFloat(item.remainingAmount ?? item.tokenAmount ?? "0") || 0;
+      const amount =
+        Number.parseFloat(item.remainingAmount ?? item.tokenAmount ?? "0") || 0;
       const totalCkb = shannonsToCkb(item.pricePerToken);
       return { price: amount > 0 ? totalCkb / amount : totalCkb, amount };
     })
@@ -1541,7 +1750,8 @@ function normalizeOrderBook(items: ApiOrderItem[]) {
   const bids = items
     .filter((item) => item.direction === "BID")
     .map((item) => {
-      const amount = Number.parseFloat(item.remainingAmount ?? item.tokenAmount ?? "0") || 0;
+      const amount =
+        Number.parseFloat(item.remainingAmount ?? item.tokenAmount ?? "0") || 0;
       const totalCkb = shannonsToCkb(item.pricePerToken);
       return { price: amount > 0 ? totalCkb / amount : totalCkb, amount };
     })
@@ -1615,11 +1825,18 @@ function fmtAmount(value: number) {
 }
 
 function fmtCkb(value: number) {
-  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function fmtTime(date: Date) {
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 export default App;
