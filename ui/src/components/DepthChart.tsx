@@ -5,11 +5,14 @@ export type DepthPoint = { price: number; amount: number; cumulative?: number };
 type PlotPoint = { price: number; cumulative: number };
 
 const WIDTH = 600;
-const HEIGHT = 160;
+const HEIGHT = 190;
 const PAD_TOP = 18;
-const PAD_BOTTOM = 22;
-const PAD_X = 4;
+const PAD_BOTTOM = 26;
+const PAD_X = 6;
 const PLOT_HEIGHT = HEIGHT - PAD_TOP - PAD_BOTTOM;
+// Horizontal reference lines as a fraction of the plot height, low-to-high - gives the
+// cumulative-amount axis an actual scale to read against, like the endlabels alone didn't.
+const GRIDLINE_FRACTIONS = [0.25, 0.5, 0.75];
 
 /**
  * Cumulative order-book depth, bids and asks meeting at the spread. Renders nothing (the
@@ -137,6 +140,18 @@ export function DepthChart({
         aria-label="Cumulative order book depth for bids and asks"
         preserveAspectRatio="none"
       >
+        {GRIDLINE_FRACTIONS.map((fraction) => {
+          const y = toY(maxCumulative * fraction);
+          return (
+            <g key={fraction}>
+              <line x1={PAD_X} y1={y} x2={WIDTH - PAD_X} y2={y} className="depth-chart-gridline" />
+              <text x={PAD_X + 4} y={y - 4} className="depth-chart-gridlabel">
+                {formatDepthAmount(maxCumulative * fraction)}
+              </text>
+            </g>
+          );
+        })}
+
         <line
           x1={PAD_X}
           y1={toY(0)}
@@ -145,6 +160,9 @@ export function DepthChart({
           className="depth-chart-baseline"
         />
         <line x1={midX} y1={PAD_TOP} x2={midX} y2={toY(0)} className="depth-chart-mid" />
+        <text x={midX} y={PAD_TOP - 6} textAnchor="middle" className="depth-chart-midlabel">
+          {fmtDepthPrice(midPrice)}
+        </text>
 
         {bidPath ? <path d={bidPath} className="depth-chart-area bid" /> : null}
         {bidPath ? <path d={bidPath} className="depth-chart-line bid" /> : null}

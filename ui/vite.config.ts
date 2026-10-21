@@ -4,7 +4,7 @@ import { defineConfig, loadEnv } from 'vite'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const ckbRpcUrl = env.VITE_CKB_RPC_URL || 'http://127.0.0.1:28114'
+  const ckbRpcUrl = env.VITE_CKB_RPC_URL || 'https://testnet.ckb.dev'
 
   return {
     plugins: [react()],

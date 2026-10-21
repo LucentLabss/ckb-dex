@@ -2,18 +2,22 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
-import type { Config } from "../types";
+import type { Config } from "../types/index.js";
 import DexOrderBot, { OrderDoc } from "./index.js";
+import dexScriptsJson from "../../../deployment/scripts.json" with { type: "json" };
 
-// Must match the "dex-order-lock" entry in deployment/scripts.json so the bot's
+// Read from the "dex-order-lock" entry in deployment/scripts.json so the bot's
 // constructor can resolve its cell deps without touching the network.
+const dexDeployment = dexScriptsJson.testnet["dex-order-lock"];
+
 const config: Config = {
   mongodbUrl: "mongodb://127.0.0.1:27017/test",
   ckbRpcUrl: "http://127.0.0.1:8114",
+  ckbNetwork: "devnet",
   enviroment: "development",
   dexOrderLockScript: {
-    codeHash: "0xcf8604433cfbd424e8fd32f0c59aca23ab09e528eb3e3281519ad6451f636b51",
-    hashType: "data2",
+    codeHash: dexDeployment.codeHash as `0x${string}`,
+    hashType: dexDeployment.hashType as "data2",
     args: "0x",
   },
   internalBotToken: "test-bot-token",

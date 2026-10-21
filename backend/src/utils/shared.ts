@@ -1,6 +1,6 @@
 // Provides shared API response helpers and CKB-oriented value conversion utilities.
 import { Response } from "express";
-import { AppApiResponse, DexLockArgs, HashType, Hex, OrderType, Script } from "../types";
+import { AppApiResponse, DexLockArgs, HashType, Hex, OrderType, Script } from "../types/index.js";
 import AppError from "../services/error.js";
 import { numToBytes } from "@ckb-ccc/core";
 

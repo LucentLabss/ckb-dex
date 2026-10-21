@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
 import { Check, Copy, LoaderCircle, Moon, RefreshCw, Sun } from "lucide-react";
+import { Check, Copy, Moon, RefreshCw, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
   buildCreateOrderTx,
@@ -14,7 +15,6 @@ import {
   xudtTypeHash,
   type CancelableOrder,
 } from "./lib/dex";
-import { DepthChart } from "./components/DepthChart";
 import "./App.css";
 
 type Side = "buy" | "sell";
@@ -136,43 +136,21 @@ const fixtureBids: MarketRow[] = [
 ];
 
 const fixtureTrades: TradeEntry[] = [
-  {
-    time: "12:42:18",
-    price: "0.008140",
-    amount: "150",
-    side: "buy",
-    hash: "0x91a3...44b2",
-  },
-  {
-    time: "12:39:02",
-    price: "0.008150",
-    amount: "60",
-    side: "sell",
-    hash: "0x0cfa...8e31",
-  },
-  {
-    time: "12:31:47",
-    price: "0.008138",
-    amount: "220",
-    side: "buy",
-    hash: "0x7d02...9c10",
-  },
-  {
-    time: "12:26:11",
-    price: "0.008160",
-    amount: "80",
-    side: "sell",
-    hash: "0x321e...51aa",
-  },
+  { time: "12:42:18", price: "0.008140", amount: "150", side: "buy", hash: "0x91a3...44b2" },
+  { time: "12:39:02", price: "0.008150", amount: "60", side: "sell", hash: "0x0cfa...8e31" },
 ];
 
 const defaultMidPrice = 0.00814;
 const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:3000/api/v1";
+// The faucet is a separate small service (see faucet/) - unset by default so it never
+// shows up unless explicitly configured, and never on mainnet regardless.
+const faucetUrl = import.meta.env.VITE_FAUCET_URL as string | undefined;
 const wsBase =
   (import.meta.env.VITE_WS_URL as string | undefined) ??
   apiBase.replace(/^http/, "ws").replace(/\/api\/v\d+\/?$/, "");
 const tradingPairLabel = xudtTypeHash ? "TOKEN / CKB" : "DEMO / CKB";
 const marketReady = Boolean(xudtTypeHash);
+const networkLabel = `${DEX_NETWORK.charAt(0).toUpperCase()}${DEX_NETWORK.slice(1)}`;
 
 // In dev the app always talks to the vite proxy at /api/ckb-rpc (the local CKB node has
 // no CORS headers of its own - see vite.config.ts). In a production build, fall back to a
@@ -191,9 +169,9 @@ const ckbClient = new ccc.ClientPublicTestnet({
 // Dev-only escape hatch: JoyID (and most hosted/extension wallets) can't represent a local
 // devnet identity - they're tied to real testnet/mainnet. This lets local devnet testing use
 // a plain private key (e.g. offchain/.env's MAKER_PRIVATE_KEY, which already holds devnet CKB
-// and demo tokens) instead. Never exposed outside dev builds - a raw key in the browser is
-// only acceptable for throwaway devnet funds.
-const devPrivateKey = import.meta.env.DEV
+// and demo tokens) instead. Only acceptable for throwaway devnet funds, so gated on both a
+// dev build AND devnet - never exposed against testnet or mainnet, even from `vite dev`.
+const devPrivateKey = import.meta.env.DEV && DEX_NETWORK === "devnet"
   ? (import.meta.env.VITE_DEV_PRIVATE_KEY as string | undefined)
   : undefined;
 
@@ -235,6 +213,7 @@ function WalletApp() {
   const [loadingMarket, setLoadingMarket] = useState(marketReady);
   const [loadingMyOrders, setLoadingMyOrders] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
   const [confirmOrder, setConfirmOrder] = useState<{
     side: Side;
     amount: number;
@@ -264,6 +243,8 @@ function WalletApp() {
     CKB: 0,
     TOKEN: 0,
   });
+  const [faucetLoading, setFaucetLoading] = useState(false);
+  const [faucetCooldownSeconds, setFaucetCooldownSeconds] = useState(0);
   const [refreshingBalance, setRefreshingBalance] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -299,6 +280,16 @@ function WalletApp() {
     }
   }, [theme]);
 
+  // The faucet only reports a cooldown after a claim attempt. Count it down locally so
+  // the action stays unavailable and the label remains useful without extra API polling.
+  useEffect(() => {
+    if (faucetCooldownSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      setFaucetCooldownSeconds((remaining) => Math.max(0, remaining - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [faucetCooldownSeconds > 0]);
+
   function toggleTheme() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
   }
@@ -325,8 +316,10 @@ function WalletApp() {
         setMakerLockHash(address.script.hash());
         void fetchWalletBalance(address.script);
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return;
+        console.error("Failed to resolve a CKB address for the connected signer:", error);
+        showToast(formatError(error, "Couldn't resolve a CKB address for this wallet"));
         setWalletAddress(null);
         setMakerLockHash(null);
         setWalletBalance({ CKB: 0, TOKEN: 0 });
@@ -385,6 +378,53 @@ function WalletApp() {
       return false;
     } finally {
       finishWalletBalanceRequest();
+    }
+  }
+
+  // Manual escape hatch: the WS/event pipeline is usually fast, but a bot poll cycle or a
+  // dropped WS message can still leave the shown balance stale for a bit - this always
+  // re-queries the chain directly, no matter what the event pipeline is doing.
+  async function refreshWalletBalance() {
+    if (!signer || refreshingBalance) return;
+    setRefreshingBalance(true);
+    try {
+      const address = await signer.getRecommendedAddressObj();
+      await fetchWalletBalance(address.script);
+    } finally {
+      setRefreshingBalance(false);
+    }
+  }
+
+  async function claimFaucetTokens() {
+    if (!faucetUrl || !signer || !walletAddress) return;
+
+    setFaucetLoading(true);
+    try {
+      const response = await fetch(`${faucetUrl}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: walletAddress }),
+      });
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        const cooldownSeconds = readFaucetCooldownSeconds(body?.message);
+        if (cooldownSeconds !== null) {
+          setFaucetCooldownSeconds(cooldownSeconds);
+          showToast(`Faucet cooldown: available again in ${formatFaucetCooldown(cooldownSeconds)}`);
+        } else {
+          showToast(body?.message ?? "Faucet claim failed");
+        }
+        return;
+      }
+
+      showToast(`Faucet sent ${body?.data?.amount ?? "test"} TOKEN — ${shortHash(body?.data?.txHash ?? "")}`);
+      const address = await signer.getRecommendedAddressObj();
+      void fetchWalletBalance(address.script);
+    } catch (error) {
+      showToast(formatError(error, "Faucet claim failed"));
+    } finally {
+      setFaucetLoading(false);
     }
   }
 
@@ -480,17 +520,13 @@ function WalletApp() {
     void refreshMyOrders(makerLockHash);
   }, [makerLockHash]);
 
-  // Local orders (just placed/cancelled) are kept until the backend reports the same
-  // status for the same id - at which point the backend's version is authoritative and
-  // the local placeholder is no longer needed.
+  // Local orders (just placed/cancelled) are kept until the backend reports anything at
+  // all for the same id - at which point the backend's version is authoritative and the
+  // local placeholder is no longer needed. Note this can never be "the same status": the
+  // placeholder's status is the local-only "Broadcasting", which the backend never reports.
   useEffect(() => {
     setPendingOrders((previous) =>
-      previous.filter((pending) => {
-        const fromServer = serverOrders.find(
-          (order) => order.id === pending.id,
-        );
-        return !(fromServer && fromServer.status === pending.status);
-      }),
+      previous.filter((pending) => !serverOrders.some((order) => order.id === pending.id)),
     );
   }, [serverOrders]);
 
@@ -570,6 +606,12 @@ function WalletApp() {
   function applyMyOrders(items: ApiOrderItem[]) {
     setServerOrders(items.map(mapApiOrder));
     setLoadingMyOrders(false);
+    // Any push here means something about this maker's orders just changed (filled,
+    // cancelled, matched) - exactly when the on-chain balance would have moved too, unlike
+    // the one-shot fetch right after submitting, which fires before that's actually true.
+    if (signer) {
+      void signer.getRecommendedAddressObj().then((address) => fetchWalletBalance(address.script));
+    }
   }
 
   async function refreshMyOrders(lockHash: string) {
@@ -799,8 +841,9 @@ function WalletApp() {
   }
 
   async function handleCancelOrder(order: Order) {
-    if (!signer || !order.raw) return;
+    if (!signer || !order.raw || cancellingIds.has(order.id)) return;
 
+    setCancellingIds((previous) => new Set(previous).add(order.id));
     try {
       const tx = await buildCancelOrderTx({ signer, client, order: order.raw });
       const txHash = await signer.sendTransaction(tx);
@@ -812,6 +855,12 @@ function WalletApp() {
       if (makerLockHash) void refreshMyOrders(makerLockHash);
     } catch (error) {
       showToast(formatError(error, "Cancel failed"));
+    } finally {
+      setCancellingIds((previous) => {
+        const next = new Set(previous);
+        next.delete(order.id);
+        return next;
+      });
     }
   }
 
@@ -884,9 +933,9 @@ function WalletApp() {
         <div className="header-left">
           <div className="logo">
             <span className="dot" />
-            CKB order book
+            LucentDex
           </div>
-          <span className="chain-badge">CKB {DEX_NETWORK}</span>
+          <span className="chain-badge">{networkLabel}</span>
           <span className="chain-badge">{tradingPairLabel}</span>
         </div>
 
@@ -918,7 +967,31 @@ function WalletApp() {
             <span>
               <b className="mono">{fmtCkb(walletBalance.CKB)}</b> CKB
             </span>
+            <button
+              type="button"
+              className="refresh-balance-btn"
+              title="Refresh balance"
+              aria-label="Refresh balance"
+              disabled={refreshingBalance}
+              onClick={() => void refreshWalletBalance()}
+            >
+              <RefreshCw size={13} className={refreshingBalance ? "spin" : ""} />
+            </button>
           </div>
+          {connected && faucetUrl && DEX_NETWORK !== "mainnet" ? (
+            <button
+              type="button"
+              className="faucet-header-btn"
+              disabled={faucetLoading || faucetCooldownSeconds > 0}
+              onClick={() => void claimFaucetTokens()}
+            >
+              {faucetLoading
+                ? "Requesting…"
+                : faucetCooldownSeconds > 0
+                  ? `TOKEN in ${formatFaucetCooldown(faucetCooldownSeconds)}`
+                  : "Get test TOKEN"}
+            </button>
+          ) : null}
           <div className="wallet-controls">
             <button
               type="button"
@@ -985,10 +1058,6 @@ function WalletApp() {
             ) : null}
           </div>
           <div className="panel-body">
-            {askRows.length > 0 || bidRows.length > 0 ? (
-              <DepthChart bids={bidRows} asks={askRows} midPrice={midPrice} />
-            ) : null}
-
             <div className="book-cols">
               <span>Price (CKB)</span>
               <span>Amount (TOKEN)</span>
@@ -1018,11 +1087,9 @@ function WalletApp() {
                         width: `${((row.cumulative ?? 0) / maxDepth) * 100}%`,
                       }}
                     />
-                    <span className="mono red">{fmtPrice(row.price)}</span>
-                    <span className="mono">{fmtAmount(row.amount)}</span>
-                    <span className="mono muted">
-                      {fmtAmount(row.cumulative ?? 0)}
-                    </span>
+                    <span className="mono red book-col-price">{fmtPrice(row.price)}</span>
+                    <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted book-col-total">{fmtAmount(row.cumulative ?? 0)}</span>
                   </button>
                 ))
               )}
@@ -1059,11 +1126,9 @@ function WalletApp() {
                         width: `${((row.cumulative ?? 0) / maxDepth) * 100}%`,
                       }}
                     />
-                    <span className="mono green">{fmtPrice(row.price)}</span>
-                    <span className="mono">{fmtAmount(row.amount)}</span>
-                    <span className="mono muted">
-                      {fmtAmount(row.cumulative ?? 0)}
-                    </span>
+                    <span className="mono green book-col-price">{fmtPrice(row.price)}</span>
+                    <span className="mono book-col-amount">{fmtAmount(row.amount)}</span>
+                    <span className="mono muted book-col-total">{fmtAmount(row.cumulative ?? 0)}</span>
                   </button>
                 ))
               )}
@@ -1072,7 +1137,25 @@ function WalletApp() {
         </div>
 
         <div className="panel">
-          <div className="panel-header">Place order</div>
+          <div className="panel-header order-entry-header">
+            <span>Place order</span>
+            <div className="order-type-segment" aria-label="Order type">
+              <button
+                type="button"
+                className={orderType === "limit" ? "active" : ""}
+                onClick={() => setOrderTypeValue("limit")}
+              >
+                Limit
+              </button>
+              <button
+                type="button"
+                className={orderType === "market" ? "active" : ""}
+                onClick={() => setOrderTypeValue("market")}
+              >
+                Market
+              </button>
+            </div>
+          </div>
           <div className="panel-body trade-panel-body">
             <div className="seg" id="sideSeg">
               <button
@@ -1081,23 +1164,6 @@ function WalletApp() {
                 onClick={() => setOrderSide("buy")}
               >
                 Buy
-              </button>
-              <button
-                type="button"
-                className={side === "sell" ? "active sell" : "sell"}
-                onClick={() => setOrderSide("sell")}
-              >
-                Sell
-              </button>
-            </div>
-
-            <div className="seg seg-type" id="typeSeg">
-              <button
-                type="button"
-                className={orderType === "limit" ? "active" : ""}
-                onClick={() => setOrderTypeValue("limit")}
-              >
-                Limit
               </button>
               {/* <button
                 type="button"
@@ -1199,7 +1265,7 @@ function WalletApp() {
             <div className="trade-list">
               <div className="trade-list-header">Recent trades</div>
               {loadingMarket && trades.length === 0 ? (
-                <TradeRowSkeleton rows={3} />
+                <TradeRowSkeleton rows={2} />
               ) : trades.length === 0 ? (
                 <p className="book-empty">No trades yet</p>
               ) : (
@@ -1344,9 +1410,10 @@ function WalletApp() {
                           <button
                             type="button"
                             className="cancel-btn"
+                            disabled={cancellingIds.has(order.id)}
                             onClick={() => void handleCancelOrder(order)}
                           >
-                            Cancel
+                            {cancellingIds.has(order.id) ? "Cancelling…" : "Cancel"}
                           </button>
                         </td>
                       </tr>
@@ -1696,7 +1763,7 @@ function normalizeOrderBook(items: ApiOrderItem[]) {
 }
 
 function normalizeTrades(items: ApiTradeItem[]): TradeEntry[] {
-  return items.slice(0, 4).map((item, index) => {
+  return items.slice(0, 2).map((item, index) => {
     const amount = Number.parseFloat(item.tokenAmount ?? "0") || 0;
     const totalCkb = shannonsToCkb(item.price);
     const price = amount > 0 ? totalCkb / amount : totalCkb;
@@ -1723,6 +1790,21 @@ function formatError(error: unknown, fallback: string) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return fallback;
+}
+
+function readFaucetCooldownSeconds(message: unknown): number | null {
+  if (typeof message !== "string") return null;
+  const match = /try again in (\d+)s/i.exec(message);
+  if (!match) return null;
+  const seconds = Number.parseInt(match[1], 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+function formatFaucetCooldown(seconds: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(seconds / 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
 function shortAddress(address: string) {

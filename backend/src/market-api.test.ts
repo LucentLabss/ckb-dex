@@ -7,12 +7,13 @@ import mongoose from "mongoose";
 import { createExpressServer } from "./app.js";
 import OrderModel from "./models/order.js";
 import TradeModel from "./models/trade.js";
-import type { Config } from "./types";
+import type { Config } from "./types/index.js";
 
 const config: Config = {
   mongodbUrl: "mongodb://127.0.0.1:27017/ckb-dex",
   ckbRpcUrl: "http://127.0.0.1:8114",
-  enviroment: "development",
+  ckbNetwork: "devnet",
+      enviroment: "development",
   dexOrderLockScript: {
     codeHash: `0x${"11".repeat(32)}` as `0x${string}`,
     hashType: "type",

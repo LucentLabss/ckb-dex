@@ -1,10 +1,3 @@
-// Builds and submits dex-order-lock transactions (create / cancel) against the deployed
-// DEX contract, using the connected wallet signer instead of a raw private key.
-//
-// Order args layout (see smart-contract/contracts/dex-order-lock/src/main.rs):
-//   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE) = 90 bytes.
-// `price` is the flat total CKB (in shannons) to be exchanged for the whole `tokenAmount`,
-// not a per-token rate - matching orders must share the exact same tokenAmount and price.
 import { ccc } from "@ckb-ccc/core";
 import scriptsJson from "../../../deployment/scripts.json";
 import systemScriptsJson from "../../../deployment/system-scripts.json";
@@ -16,6 +9,26 @@ interface DeploymentScriptEntry {
   hashType: string;
   cellDeps: { cellDep: ccc.CellDepLike }[];
 }
+
+// `offckb system-scripts --export-style ccc` shape: nested by network, each script keyed
+// by its own snake_case name under a `.script` sub-object.
+interface OffckbScriptEntry {
+  name: string;
+  script: DeploymentScriptEntry;
+}
+
+// Maps offckb's snake_case script names to ccc's KnownScript names.
+const KNOWN_SCRIPT_NAME_MAP: Record<string, ccc.KnownScript> = {
+  secp256k1_blake160_sighash_all: ccc.KnownScript.Secp256k1Blake160,
+  secp256k1_blake160_multisig_all: ccc.KnownScript.Secp256k1Multisig,
+  dao: ccc.KnownScript.NervosDao,
+  sudt: ccc.KnownScript.SUdt,
+  xudt: ccc.KnownScript.XUdt,
+  omnilock: ccc.KnownScript.OmniLock,
+  anyone_can_pay: ccc.KnownScript.AnyoneCanPay,
+  nostr_lock: ccc.KnownScript.NostrLock,
+  type_id: ccc.KnownScript.TypeId,
+};
 
 export const DEX_NETWORK = (import.meta.env.VITE_DEX_NETWORK as string | undefined) ?? "devnet";
 
@@ -29,12 +42,45 @@ if (!dexDeployment) {
   );
 }
 
-const xudtDeployment = (systemScriptsJson as Record<string, DeploymentScriptEntry>).XUdt;
+const systemScriptsForNetwork = (
+  systemScriptsJson as Record<string, Record<string, OffckbScriptEntry> | undefined>
+)[DEX_NETWORK];
 
-export const systemScripts = systemScriptsJson as unknown as Record<
-  ccc.KnownScript,
-  ccc.ScriptInfoLike | undefined
->;
+if (!systemScriptsForNetwork) {
+  throw new Error(
+    `No system-scripts entries for network "${DEX_NETWORK}" in deployment/system-scripts.json`,
+  );
+}
+
+const xudtEntry = systemScriptsForNetwork.xudt;
+if (!xudtEntry) {
+  throw new Error(`No "xudt" system-script entry for network "${DEX_NETWORK}"`);
+}
+const xudtDeployment = xudtEntry.script;
+
+// Only devnet needs a custom `scripts` override for the CKB client - ccc's
+// ClientPublicTestnet already ships a complete, accurate built-in registry for testnet
+// (TESTNET_SCRIPTS) covering everything, including wallet-bridging locks like PWLock and
+// JoyID that offckb doesn't export at all. Overriding wholesale for testnet would silently
+// drop any script we didn't hand-map, breaking wallets that need it (see the "No script
+// information was found for PWLock on ckt" error connecting MetaMask). On mainnet ccc has
+// its own built-in registry too, so the same reasoning applies there.
+export const systemScripts: Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined> | undefined =
+  DEX_NETWORK === "devnet"
+    ? (() => {
+        const known: Record<string, ccc.ScriptInfoLike> = {};
+        for (const [snakeName, entry] of Object.entries(systemScriptsForNetwork)) {
+          const knownName = KNOWN_SCRIPT_NAME_MAP[snakeName];
+          if (!knownName) continue;
+          known[knownName] = {
+            codeHash: entry.script.codeHash,
+            hashType: entry.script.hashType,
+            cellDeps: entry.script.cellDeps,
+          };
+        }
+        return known as unknown as Record<ccc.KnownScript, ccc.ScriptInfoLike | undefined>;
+      })()
+    : undefined;
 
 export const dexCellDeps: ccc.CellDepLike[] = dexDeployment.cellDeps.map(({ cellDep }) => cellDep);
 export const xudtCellDeps: ccc.CellDepLike[] = xudtDeployment.cellDeps.map(({ cellDep }) => cellDep);
@@ -44,9 +90,7 @@ export const dexScript = {
   hashType: dexDeployment.hashType as ccc.HashTypeLike,
 };
 
-// The demo token's xUDT args are `issuerLockHash(32) + 0x00000000`, mirroring
-// offchain/src/issue-token.ts. Configure the issuer's lock hash so the UI can
-// reconstruct the same type script and trade the same token.
+// The demo token's xUDT args are `issuerLockHash(32) + 0x00000000` (see offchain/src/issue-token.ts).
 const issuerLockHash = import.meta.env.VITE_XUDT_ISSUER_LOCK_HASH as string | undefined;
 
 export const xudtType: ccc.Script | undefined = issuerLockHash
@@ -65,14 +109,10 @@ export const SIDE_BUY = 0;
 export const SIDE_SELL = 1;
 export type OrderSide = typeof SIDE_BUY | typeof SIDE_SELL;
 
-// The settlement tx the bot builds has exactly two outputs - the seller's payout (which the
-// contract requires be paid in full, no fee deducted) and this buyer's token cell - so the
-// network fee can only come from unclaimed surplus on this order's own capacity. The bot
-// requires that surplus to cover tx.estimateFee(1_000n) (measured ~520 shannons for this
-// exact 2-in/2-out shape) plus its own 5_000n buffer (see DexOrderBot.executeTrade in
-// backend/src/bot/index.ts) - reserve well past that combined ~5_520n floor here too, since
-// this side can't compute the bot's estimate exactly ahead of matching. Exported so the UI
-// can disclose it to the trader before they submit a buy order.
+// The network fee for a matched settlement can only come from surplus on the buy order's
+// own capacity (the seller must be paid in full - see DexOrderBot.executeTrade), so a buy
+// order needs to reserve extra beyond price + its token cell. ~5_520n is the bot's actual
+// floor; this pads well past it since we can't compute its estimate exactly ahead of time.
 export const SETTLEMENT_FEE_RESERVE = 20_000n;
 
 export function buildDexLock(params: {
@@ -102,11 +142,7 @@ export function buildDexLock(params: {
   });
 }
 
-/**
- * Builds a transaction that creates a new BUY or SELL order cell for the connected wallet.
- * Mirrors offchain/src/create-order.ts, but sized to the real 90-byte contract args and
- * signed by whichever wallet the UI is connected to instead of a private key from .env.
- */
+/** Builds a transaction that creates a new BUY or SELL order cell for the connected wallet. */
 export async function buildCreateOrderTx(params: {
   signer: ccc.Signer;
   client: ccc.Client;
@@ -156,11 +192,8 @@ export async function buildCreateOrderTx(params: {
     return tx;
   }
 
-  // BUY: the order cell must be pre-funded with price + the capacity of the token cell
-  // the maker will eventually receive on settlement (see validate_buy_order in main.rs).
-  // Build that future output on a scratch transaction purely to read its auto-computed
-  // minimal capacity, the same way ccc.Transaction.from sizes any output whose capacity
-  // is left unset (see offchain/src/create-order.ts).
+  // BUY: pre-fund the order with price + the future token cell's minimal capacity, read
+  // off a scratch tx (see validate_buy_order in main.rs).
   const settlementScratchTx = ccc.Transaction.from({
     outputs: [{ lock: makerLock, type: xudtType }],
     outputsData: [ccc.numLeToBytes(tokenAmount, 16)],
@@ -187,12 +220,10 @@ export interface CancelableOrder {
 }
 
 /**
- * Builds a transaction that cancels (spends back to the maker) a live order cell.
- * The dex-order-lock has no signature check of its own - it treats the spend as a
- * cancellation once one of the transaction's other inputs carries the maker's own lock
- * hash (see program_entry in main.rs). We guarantee that explicitly rather than relying
- * on completeInputsByCapacity happening to add one, since it may not if the order cell's
- * own capacity already covers the returned output and fee.
+ * Cancels a live order cell. The dex-order-lock treats the spend as authorized once one
+ * of the tx's other inputs carries the maker's own lock hash (see program_entry in
+ * main.rs) - ensured explicitly below, since completeInputsByCapacity won't add one if
+ * the order's own capacity already covers the output and fee.
  */
 export async function buildCancelOrderTx(params: {
   signer: ccc.Signer;

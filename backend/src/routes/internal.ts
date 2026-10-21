@@ -1,9 +1,9 @@
 // Accepts authenticated, schema-validated domain events emitted by the chain-indexing bot.
 import { Router, Request, Response } from "express";
 import AppError from "../services/error.js";
-import { EventIngestionService } from "../services";
-import { botEventSchema } from "../schemas";
-import { sendSuccess } from "../utils";
+import { EventIngestionService } from "../services/index.js";
+import { botEventSchema } from "../schemas/index.js";
+import { sendSuccess } from "../utils/index.js";
 
 const router = Router();
 const ingestionService = new EventIngestionService();

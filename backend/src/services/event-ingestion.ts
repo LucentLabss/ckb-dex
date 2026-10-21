@@ -7,11 +7,11 @@ import {
   OrderConfirmedEvent,
   SettlementSubmittedEvent,
   TradeConfirmedEvent,
-} from "../schemas";
+} from "../schemas/index.js";
 import {
   IngestionEventDocument,
   OrderStatus,
-} from "../models";
+} from "../models/index.js";
 import IngestionEventModel from "../models/ingestion-event.js";
 import OrderModel from "../models/order.js";
 import TradeModel from "../models/trade.js";

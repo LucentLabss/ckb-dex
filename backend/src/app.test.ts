@@ -57,6 +57,7 @@ test("Server health and readiness endpoints respond correctly", async () => {
     {
       mongodbUrl: "mongodb://127.0.0.1:27017/ckb-dex",
       ckbRpcUrl: "http://127.0.0.1:8114",
+      ckbNetwork: "devnet",
       enviroment: "development",
       dexOrderLockScript: {
         codeHash: `0x${"11".repeat(32)}`,
