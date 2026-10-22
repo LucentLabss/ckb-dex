@@ -55,6 +55,11 @@ export interface OrderDocument {
   totalAskCapacity?: string;
   createdAtBlock?: string;
   createdAtTxHash?: string;
+  /** Hash of the block that created the cell; lets a reorg tell re-included orders from reverted ones. */
+  createdBlockHash?: string;
+  /** Block and hash of the confirmed transaction that spent the cell (fill or cancel). */
+  spentAtBlock?: string;
+  spentBlockHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -124,6 +129,9 @@ export const OrderSchema = new Schema<OrderDocument>(
     totalAskCapacity: { type: String },
     createdAtBlock: { type: String },
     createdAtTxHash: { type: String },
+    createdBlockHash: { type: String },
+    spentAtBlock: { type: String },
+    spentBlockHash: { type: String },
   },
   { timestamps: true },
 );

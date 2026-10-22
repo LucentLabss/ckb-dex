@@ -18,6 +18,9 @@ import TradeModel from "../models/trade.js";
 import { HydratedDocument } from "mongoose";
 import type { OrderDocument } from "../models/order.js";
 import { RealtimeBroadcaster } from "./realtime.js";
+import AppError from "./error.js";
+import { getChainVerification } from "./chain-verifier.js";
+import { verifyEvent } from "./event-verification.js";
 
 type IngestionResultStatus = "APPLIED" | "IGNORED";
 
@@ -54,14 +57,6 @@ function toOrderId(txHash: string, index: string): string {
   return `${txHash}:${index}`;
 }
 
-function hasConfirmation(event: BotEvent): boolean {
-  if (event.confirmations != undefined) {
-    return event.confirmations > 0;
-  }
-
-  return event.blockNumber != undefined && event.blockHash != undefined;
-}
-
 function canTransition(currentStatus: OrderStatus, nextStatus: OrderStatus): boolean {
   return allowedTransitions[currentStatus].includes(nextStatus);
 }
@@ -88,6 +83,29 @@ async function persistIngestionEvent(input: {
   }], { session: input.session });
 }
 
+/** Failed deliveries are auditable but retryable: one record per eventId, rewritten on each failure. */
+async function recordFailedEvent(event: BotEvent, message: string): Promise<void> {
+  await IngestionEventModel.updateOne(
+    { eventId: event.eventId, processingStatus: "FAILED" },
+    {
+      $set: {
+        schemaVersion: event.schemaVersion,
+        eventType: event.eventType,
+        occurredAt: new Date(event.occurredAt),
+        transactionHash: event.transactionHash,
+        blockNumber: event.blockNumber,
+        blockHash: event.blockHash,
+        confirmations: event.confirmations,
+        payload: event,
+        processingStatus: "FAILED",
+        processingError: message,
+        processedAt: new Date(),
+      },
+    },
+    { upsert: true },
+  );
+}
+
 async function updateOrderStatus(
   order: HydratedDocument<import("../models").OrderDocument>,
   nextStatus: OrderStatus,
@@ -107,7 +125,11 @@ export class EventIngestionService {
   private readonly realtime = RealtimeBroadcaster.getInstance();
 
   public async ingest(event: BotEvent): Promise<IngestionResult> {
-    const existing = await IngestionEventModel.findOne({ eventId: event.eventId }).lean();
+    // A FAILED record is an audit trail, not a tombstone: only a processed event is a duplicate.
+    const existing = await IngestionEventModel.findOne({
+      eventId: event.eventId,
+      processingStatus: { $ne: "FAILED" },
+    }).lean();
     if (existing != undefined) {
       return {
         status: "IGNORED",
@@ -115,6 +137,9 @@ export class EventIngestionService {
         reason: "duplicate-event-id",
       };
     }
+
+    // Nothing the producer claims reaches the projection until the chain agrees.
+    await this.verify(event);
 
     const session = await mongoose.startSession();
     let afterCommit: ApplyContext["afterCommit"] = [];
@@ -125,6 +150,7 @@ export class EventIngestionService {
       const result = await session.withTransaction(async () => {
         const ctx: ApplyContext = { session, afterCommit: [] };
         const applied = await this.applyEvent(event, ctx);
+        await IngestionEventModel.deleteOne({ eventId: event.eventId, processingStatus: "FAILED" }, { session });
         await persistIngestionEvent({
           event,
           processingStatus: applied.status,
@@ -144,22 +170,36 @@ export class EventIngestionService {
         return { status: "IGNORED", eventId: event.eventId, reason: "duplicate-event-id" };
       }
 
-      const message = error instanceof Error ? error.message : "unknown-error";
-
-      // Outside the (aborted) transaction so the failure is still auditable.
-      try {
-        await persistIngestionEvent({
-          event,
-          processingStatus: "FAILED",
-          processingError: message,
-        });
-      } catch (persistError) {
-        console.error("Failed to persist failed ingestion event", persistError);
-      }
-
+      await this.auditFailure(event, error);
       throw error;
     } finally {
       await session.endSession();
+    }
+  }
+
+  /** Runs chain verification; rejections are audited, transient RPC trouble is reported as 503. */
+  private async verify(event: BotEvent): Promise<void> {
+    const verification = getChainVerification();
+    try {
+      await verifyEvent(event, verification, async (ids) =>
+        OrderModel.find({ _id: { $in: ids } }).lean());
+    } catch (error) {
+      if (error instanceof AppError) {
+        // 409 means "not deep enough yet": retryable and not worth an audit row.
+        if (error.statusCode === 422) await this.auditFailure(event, error);
+        throw error;
+      }
+      throw new AppError(503, `Unable to verify event against CKB: ${error instanceof Error ? error.message : "rpc error"}`);
+    }
+  }
+
+  private async auditFailure(event: BotEvent, error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : "unknown-error";
+    // Outside any (aborted) transaction so the failure is still recorded.
+    try {
+      await recordFailedEvent(event, message);
+    } catch (persistError) {
+      console.error("Failed to persist failed ingestion event", persistError);
     }
   }
 
@@ -181,6 +221,13 @@ export class EventIngestionService {
   private async applyOrderConfirmed(event: OrderConfirmedEvent, ctx: ApplyContext): Promise<IngestionResult> {
     const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
 
+    // Redelivery must not clobber an order the pipeline has already moved on. A different
+    // creating block (re-inclusion after a reorg) is the one case that re-opens an order.
+    const existing = await OrderModel.findById(orderId).session(ctx.session);
+    if (existing != undefined && existing.createdBlockHash === event.blockHash && existing.status !== "ORPHANED") {
+      return { status: "IGNORED", eventId: event.eventId, reason: "order-already-indexed" };
+    }
+
     const updatePayload: Partial<OrderDocument> = {
       outPoint: {
         txHash: event.outPoint.txHash,
@@ -201,13 +248,21 @@ export class EventIngestionService {
       blockNumber: event.order.blockNumber,
       txIndex: event.order.txIndex,
       status: "LIVE",
+      createdAtBlock: event.order.blockNumber,
+      createdBlockHash: event.blockHash,
       confirmedAtBlock: event.blockNumber,
       lastEventId: event.eventId,
+      reservedUntil: null,
+      pendingTxHash: null,
     };
 
     await OrderModel.findByIdAndUpdate(
       orderId,
-      { $set: updatePayload },
+      {
+        $set: updatePayload,
+        // A re-created order starts clean: any earlier spend belonged to a reverted block.
+        $unset: { settlementTxHash: "", spentAtBlock: "", spentBlockHash: "" },
+      },
       {
         upsert: true,
         returnDocument: "after",
@@ -225,14 +280,6 @@ export class EventIngestionService {
   }
 
   private async applyOrderCancelled(event: OrderCancelledEvent, ctx: ApplyContext): Promise<IngestionResult> {
-    if (!hasConfirmation(event)) {
-      return {
-        status: "IGNORED",
-        eventId: event.eventId,
-        reason: "order-cancelled-without-confirmation",
-      };
-    }
-
     const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
     const order = await OrderModel.findById(orderId).session(ctx.session);
 
@@ -246,6 +293,8 @@ export class EventIngestionService {
 
     await updateOrderStatus(order, "CANCELED", event.eventId, ctx.session);
     order.confirmedAtBlock = event.blockNumber;
+    order.spentAtBlock = event.blockNumber;
+    order.spentBlockHash = event.blockHash;
     order.settlementTxHash = event.cancelledByTxHash;
     await order.save({ session: ctx.session });
 
@@ -297,14 +346,6 @@ export class EventIngestionService {
   }
 
   private async applyTradeConfirmed(event: TradeConfirmedEvent, ctx: ApplyContext): Promise<IngestionResult> {
-    if (!hasConfirmation(event)) {
-      return {
-        status: "IGNORED",
-        eventId: event.eventId,
-        reason: "trade-confirmed-without-confirmation",
-      };
-    }
-
     const buyOrderId = toOrderId(event.buyOrderOutPoint.txHash, event.buyOrderOutPoint.index);
     const sellOrderId = toOrderId(event.sellOrderOutPoint.txHash, event.sellOrderOutPoint.index);
     const orders = await OrderModel.find({ _id: { $in: [buyOrderId, sellOrderId] } }).session(ctx.session);
@@ -328,6 +369,8 @@ export class EventIngestionService {
     for (const order of orders) {
       order.status = "FILLED";
       order.confirmedAtBlock = event.trade.confirmedAtBlock;
+      order.spentAtBlock = event.trade.confirmedAtBlock;
+      order.spentBlockHash = event.blockHash;
       order.pendingTxHash = event.trade.settlementTxHash;
       order.settlementTxHash = event.trade.settlementTxHash;
       order.lastEventId = event.eventId;
@@ -356,11 +399,13 @@ export class EventIngestionService {
           tokenAmount: event.trade.tokenAmount,
           price: event.trade.price,
           paidCapacity: event.trade.paidCapacity,
+        },
+        // Block facts are $set so a trade re-confirmed after a reorg replaces the reverted ones.
+        $set: {
           blockNumber: event.blockNumber ?? event.trade.confirmedAtBlock,
           blockHash: event.blockHash ?? "",
           confirmedAtBlock: event.trade.confirmedAtBlock,
-        },
-        $set: {
+          status: "CONFIRMED",
           lastEventId: event.eventId,
         },
       },
@@ -381,29 +426,74 @@ export class EventIngestionService {
     return { status: "APPLIED", eventId: event.eventId };
   }
 
+  /**
+   * Rolls the projection back to the state implied by the canonical chain below
+   * `revertedBlockNumber`: orders created in reverted blocks are orphaned until a rescan
+   * re-confirms them, orders whose fill/cancel was reverted return to LIVE (the next
+   * liveness sweep re-checks the cell), and trades from reverted blocks are marked REVERTED.
+   */
   private async applyChainReorg(event: ChainReorgEvent, ctx: ApplyContext): Promise<IngestionResult> {
-    const revertedBlock = BigInt(event.revertedBlockNumber);
+    // Roll back everything above the last block known to be canonical.
+    const from = event.ancestorBlockNumber !== undefined
+      ? Number(event.ancestorBlockNumber) + 1
+      : Number(event.revertedBlockNumber);
+    const atOrAfter = (field: string) => ({
+      $expr: {
+        $gte: [{ $convert: { input: `$${field}`, to: "long", onError: null, onNull: null } }, from],
+      },
+    });
+    const session = ctx.session;
 
-    const candidates = await OrderModel.find({
-      $or: [
-        { createdAtBlock: { $exists: true } },
-        { confirmedAtBlock: { $exists: true } },
-      ],
-    }).session(ctx.session);
+    const createdReverted = await OrderModel.find({
+      ...atOrAfter("blockNumber"),
+      status: { $ne: "ORPHANED" },
+    }).session(session);
+    const spentReverted = await OrderModel.find({
+      ...atOrAfter("spentAtBlock"),
+      status: { $in: ["FILLED", "CANCELED", "CANCELLED"] },
+      _id: { $nin: createdReverted.map((order) => order._id) },
+    }).session(session);
 
-    for (const order of candidates) {
-      const createdAtBlock = order.createdAtBlock != undefined ? BigInt(order.createdAtBlock) : undefined;
-      const confirmedAtBlock = order.confirmedAtBlock != undefined ? BigInt(order.confirmedAtBlock) : undefined;
-
-      if (
-        (createdAtBlock != undefined && createdAtBlock >= revertedBlock) ||
-        (confirmedAtBlock != undefined && confirmedAtBlock >= revertedBlock)
-      ) {
-        if (order.status !== "ORPHANED") {
-          await updateOrderStatus(order, "ORPHANED", event.eventId, ctx.session);
-        }
-      }
+    for (const order of createdReverted) {
+      order.status = "ORPHANED";
+      order.reservedUntil = null;
+      order.pendingTxHash = null;
+      order.lastEventId = event.eventId;
+      await order.save({ session });
     }
+
+    for (const order of spentReverted) {
+      order.status = "LIVE";
+      order.reservedUntil = null;
+      order.pendingTxHash = null;
+      order.spentAtBlock = undefined;
+      order.spentBlockHash = undefined;
+      order.settlementTxHash = undefined;
+      order.lastEventId = event.eventId;
+      await order.save({ session });
+    }
+
+    const revertedTrades = await TradeModel.find({
+      ...atOrAfter("blockNumber"),
+      status: { $ne: "REVERTED" },
+    }).session(session);
+    for (const trade of revertedTrades) {
+      trade.status = "REVERTED";
+      trade.lastEventId = event.eventId;
+      await trade.save({ session });
+    }
+
+    const touched = [...createdReverted, ...spentReverted];
+    ctx.afterCommit.push(async () => {
+      await Promise.all([
+        ...new Set([...touched.map((order) => order.xudtTypeHash), ...revertedTrades.map((trade) => trade.xudtTypeHash)]),
+      ].flatMap((xudtTypeHash) => [
+        this.realtime.emitOrderbook(xudtTypeHash),
+        this.realtime.emitTrades(xudtTypeHash),
+      ]));
+      await Promise.all([...new Set(touched.map((order) => order.ownerLockHash))]
+        .map((ownerLockHash) => this.realtime.emitMakerOrders(ownerLockHash)));
+    });
 
     return { status: "APPLIED", eventId: event.eventId };
   }

@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = {
     ckbRpcUrl: "https://testnet.ckb.dev",
     port: 3000,
     apiVersion: 1,
+    confirmationDepth: 10,
     enviroment: "development" as const,
     dexScriptHashType: "type" as const,
     dexScriptArgs: "0x" as Hex,
@@ -145,6 +146,7 @@ export default class AppConfiguration implements AppConfig {
             ckbRpcUrl: requireEnv("CKB_RPC_URL", envs.CKB_RPC_URL, DEFAULT_CONFIG.ckbRpcUrl),
             internalBotToken: parseInternalBotToken(envs.INTERNAL_BOT_TOKEN),
             apiVersion: parseInteger("API_VERSION", envs.API_VERSION, DEFAULT_CONFIG.apiVersion),
+            confirmationDepth: parseInteger("CONFIRMATION_DEPTH", envs.CONFIRMATION_DEPTH, DEFAULT_CONFIG.confirmationDepth),
         };
 
         return this.config;

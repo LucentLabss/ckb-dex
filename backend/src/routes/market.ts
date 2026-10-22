@@ -122,7 +122,8 @@ router.get("/trades", async (req: Request, res: Response) => {
     limit: z.coerce.number().int().min(1).max(200).default(25),
   }).parse(req.query);
 
-  const filter = query.xudtTypeHash ? { xudtTypeHash: query.xudtTypeHash } : {};
+  const filter: Record<string, unknown> = { status: { $ne: "REVERTED" } };
+  if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
   const items = await TradeModel.find(filter)
     .sort({ confirmedAtBlock: -1, createdAt: -1 })
     .limit(query.limit)

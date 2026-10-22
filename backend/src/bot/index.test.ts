@@ -19,6 +19,7 @@ const config: Config = {
     args: "0x",
   },
   internalBotToken: "test-bot-token",
+  confirmationDepth: 10,
   port: 3000,
   apiVersion: 1,
 };

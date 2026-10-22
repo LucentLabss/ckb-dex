@@ -3,12 +3,14 @@ import { createExpressServer } from "./app.js";
 import DexOrderBot from "./bot/index.js";
 import AppConfiguration from "./config.js";
 import { Database } from "./services/index.js";
+import { createChainVerification, registerChainVerification } from "./services/chain-verifier.js";
 import { Config } from "./types/index.js";
 
 export let config: Config | undefined = undefined;
 
 (async function main() {
   config = await new AppConfiguration().getEnvironment();
+  registerChainVerification(createChainVerification(config));
   const dexOrderBot = new DexOrderBot(config);
   await dexOrderBot.init();
   const databaseConnection = new Database(config.mongodbUrl);
