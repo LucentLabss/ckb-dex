@@ -906,7 +906,7 @@ function WalletApp() {
       <header>
         <div className="header-left">
           <div className="logo">
-            <span className="dot" />
+            <img className="logo-mark" src="/logo.png" alt="" width={26} height={26} />
             LucentDex
           </div>
           <span className="chain-badge">{networkLabel}</span>
