@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Provider, useCcc } from "@ckb-ccc/connector-react";
 import { ccc } from "@ckb-ccc/core";
 import { Check, Copy, LoaderCircle, Moon, RefreshCw, Sun } from "lucide-react";
-import { Check, Copy, Moon, RefreshCw, Sun } from "lucide-react";
 import {
   buildCancelOrderTx,
   buildCreateOrderTx,
@@ -364,20 +363,6 @@ function WalletApp() {
       return false;
     } finally {
       finishWalletBalanceRequest();
-    }
-  }
-
-  // Manual escape hatch: the WS/event pipeline is usually fast, but a bot poll cycle or a
-  // dropped WS message can still leave the shown balance stale for a bit - this always
-  // re-queries the chain directly, no matter what the event pipeline is doing.
-  async function refreshWalletBalance() {
-    if (!signer || refreshingBalance) return;
-    setRefreshingBalance(true);
-    try {
-      const address = await signer.getRecommendedAddressObj();
-      await fetchWalletBalance(address.script);
-    } finally {
-      setRefreshingBalance(false);
     }
   }
 
@@ -867,6 +852,9 @@ function WalletApp() {
     open();
   }
 
+  // Manual escape hatch: the WS/event pipeline is usually fast, but a bot poll cycle or a
+  // dropped WS message can still leave the shown balance stale for a bit - this always
+  // re-queries the chain directly, no matter what the event pipeline is doing.
   async function refreshWalletBalance() {
     if (!signer || refreshingBalance) return;
 
