@@ -129,11 +129,12 @@ header {
   font-size: 15px;
 }
 
-.logo .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--green);
+.logo .logo-mark {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  display: block;
+  user-select: none;
 }
 
 .chain-badge {

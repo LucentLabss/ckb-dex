@@ -2,13 +2,22 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import StartupGate from './components/StartupGate'
 import { verifyAppDeployment } from './lib/client'
 
-const root = createRoot(document.getElementById('root')!)
-root.render(<p role="status">Checking CKB deployment…</p>)
-verifyAppDeployment().then(() => {
-  root.render(<StrictMode><App /></StrictMode>)
-}).catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : "Unable to verify CKB deployment"
-  root.render(<p role="alert">{message}</p>)
-})
+// Apply the saved theme before the first paint so the startup screen matches the app.
+try {
+  if (window.localStorage.getItem('ckb-dex-theme') === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light')
+  }
+} catch {
+  // localStorage unavailable (private browsing, etc.) - fall back to the default dark theme
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StartupGate verify={verifyAppDeployment}>
+    <StrictMode>
+      <App />
+    </StrictMode>
+  </StartupGate>,
+)
