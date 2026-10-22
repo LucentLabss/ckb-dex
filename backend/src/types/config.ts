@@ -23,6 +23,8 @@ export interface Config {
   enviroment: NODE_ENV,
   dexOrderLockScript: Script,
   internalBotToken: string,
+  /** Blocks a transaction must be buried under before its events may change the projection. */
+  confirmationDepth: number,
   port: number,
   apiVersion: number
 }

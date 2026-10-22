@@ -96,6 +96,7 @@ test("Server health and readiness endpoints respond correctly", async () => {
         args: "0x",
       },
       internalBotToken: VALID_TOKEN,
+  confirmationDepth: 10,
       port: 3000,
       apiVersion: 1,
     },

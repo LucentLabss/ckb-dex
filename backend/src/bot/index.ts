@@ -2,6 +2,7 @@
 import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
+import ChainCheckpoint from "../models/checkpoint.js";
 import { Config, Hex, Script } from "../types/index.js";
 import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
@@ -12,65 +13,9 @@ import { allocateSettlementCapacity } from "../../../shared/settlement-capacity.
 
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
-/**
- * dex-order-lock args (see smart-contract/contracts/dex-order-lock/src/main.rs):
- *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE)
- * The owner lock isn't embedded on-chain - it's recovered from the creating tx's inputs
- * (see findInputWithLockHash), since the lock script never runs at cell creation.
- */
-const ORDER_VERSION = 1;
-const SIDE_BUY = 0;
-const SIDE_SELL = 1;
-
-const HASH_LEN = 32;
-const AMOUNT_LEN = 16;
-const PRICE_LEN = 8;
-const ORDER_ARGS_LEN = 1 + 1 + HASH_LEN + HASH_LEN + AMOUNT_LEN + PRICE_LEN;
-
-export interface DecodedDexOrderArgs {
-  makerLockHash: Hex;
-  direction: "ASK" | "BID";
-  udtTypeHash: Hex;
-  tokenAmount: bigint;
-  pricePerToken: bigint;
-}
-
-function decodeDexOrderArgs(args: Hex): DecodedDexOrderArgs {
-  const buf = toBuffer(args);
-  if (buf.length !== ORDER_ARGS_LEN) {
-    throw new AppError(
-      400,
-      `dex order args must be ${ORDER_ARGS_LEN} bytes, got ${buf.length}`,
-    );
-  }
-
-  const version = buf.readUInt8(0);
-  if (version !== ORDER_VERSION) {
-    throw new AppError(400, `unsupported dex order args version ${version}`);
-  }
-
-  const side = buf.readUInt8(1);
-  if (side !== SIDE_BUY && side !== SIDE_SELL) {
-    throw new AppError(400, `unknown order side byte ${side}`);
-  }
-
-  let offset = 2;
-  const makerLockHash = toHex(buf.subarray(offset, offset + HASH_LEN));
-  offset += HASH_LEN;
-  const udtTypeHash = toHex(buf.subarray(offset, offset + HASH_LEN));
-  offset += HASH_LEN;
-  const tokenAmount = ccc.numLeFromBytes(toHex(buf.subarray(offset, offset + AMOUNT_LEN)));
-  offset += AMOUNT_LEN;
-  const pricePerToken = buf.readBigUInt64LE(offset);
-
-  return {
-    makerLockHash,
-    direction: side === SIDE_SELL ? "ASK" : "BID",
-    udtTypeHash,
-    tokenAmount,
-    pricePerToken,
-  };
-}
+export { decodeDexOrderArgs } from "../utils/dex-order-args.js";
+export type { DecodedDexOrderArgs } from "../utils/dex-order-args.js";
+import { decodeDexOrderArgs, type DecodedDexOrderArgs } from "../utils/dex-order-args.js";
 
 interface DexOrderBotTrait {
   readonly config: Config;
@@ -91,6 +36,9 @@ interface DexOrderBotTrait {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+/** Checkpoints kept, and how many are compared per tick when looking for the fork point. */
+const CHECKPOINT_RETENTION = 500;
+const CHECKPOINT_WINDOW = 50;
 const RESERVATION_TTL_MS = 5 * 60 * 1_000;
 // Matches the fixed fee rate the UI uses for its own order transactions (see ui/src/lib/dex.ts).
 const SETTLEMENT_FEE_RATE = 1_000n;
@@ -106,7 +54,6 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
-  private lastScannedBlock: bigint | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(config: Config, pollInterval: number = DEFAULT_POLL_INTERVAL_MS) {
@@ -137,6 +84,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
     const tick = async () => {
       try {
         await this.init();
+        await this.detectReorg();
         await this.scanForPendingOrders();
         await this.sweepTrackedOrders();
         await this.retryFailSwaps();
@@ -196,8 +144,16 @@ export default class DexOrderBot implements DexOrderBotTrait {
    */
   async scanForPendingOrders(): Promise<OrderDoc[]> {
     const tip = await this.client.getTip();
+    // Only blocks buried `confirmationDepth` deep are indexed, so shallow reorgs never reach the DB.
+    const safeTip = tip - BigInt(this.config.confirmationDepth);
+    if (safeTip < 0n) return [];
+
     const fromBlock = await this.resolveScanCursor();
-    if (fromBlock > tip) return [];
+    if (fromBlock > safeTip) return [];
+
+    // Pin the end block's hash before scanning; if it changes mid-scan the range is unreliable.
+    const endHash = (await this.client.getHeaderByNumberNoCache(safeTip))?.hash as Hex | undefined;
+    if (!endHash) return [];
 
     const dexLockTemplate: Script = {
       codeHash: this.config.dexOrderLockScript.codeHash,
@@ -213,7 +169,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       script: dexLockTemplate,
       scriptType: "lock",
       scriptSearchMode: "prefix",
-      filter: { blockRange: [fromBlock, tip + 1n] },
+      filter: { blockRange: [fromBlock, safeTip + 1n] },
       withData: true,
     };
 
@@ -222,8 +178,61 @@ export default class DexOrderBot implements DexOrderBotTrait {
       if (order) discovered.push(order);
     }
 
-    this.lastScannedBlock = tip;
+    const endHashAfter = (await this.client.getHeaderByNumberNoCache(safeTip))?.hash;
+    if (endHashAfter !== endHash) return discovered; // reorged mid-scan: leave the cursor, rescan next tick
+
+    await this.saveCheckpoint(safeTip, endHash);
     return discovered;
+  }
+
+  /** Records the scanned block's hash (the persisted cursor) and trims history beyond the window. */
+  private async saveCheckpoint(blockNumber: bigint, blockHash: Hex): Promise<void> {
+    await ChainCheckpoint.updateOne(
+      { blockNumber: Number(blockNumber) },
+      { $set: { blockHash } },
+      { upsert: true },
+    );
+    await ChainCheckpoint.deleteMany({ blockNumber: { $lt: Number(blockNumber) - CHECKPOINT_RETENTION } });
+  }
+
+  /**
+   * Compares stored checkpoint hashes with the canonical chain. On a mismatch, tells the
+   * backend to roll back everything above the last common block, then rewinds the cursor.
+   */
+  async detectReorg(): Promise<void> {
+    const checkpoints = await ChainCheckpoint.find().sort({ blockNumber: -1 }).limit(CHECKPOINT_WINDOW).lean();
+    if (checkpoints.length === 0) return;
+
+    let ancestor: number | undefined;
+    let evidence: { blockNumber: number; blockHash: string } | undefined;
+    for (const checkpoint of checkpoints) {
+      const canonical = (await this.client.getHeaderByNumberNoCache(checkpoint.blockNumber))?.hash;
+      if (canonical === checkpoint.blockHash) {
+        ancestor = checkpoint.blockNumber;
+        break;
+      }
+      evidence = checkpoint;
+    }
+    if (!evidence) return; // newest checkpoint is still canonical
+
+    // No common block inside the window: assume the fork point is just below its oldest entry.
+    const oldest = checkpoints[checkpoints.length - 1].blockNumber;
+    const ancestorBlock = ancestor ?? oldest - 1;
+
+    console.warn(`DexOrderBot detected a reorg: rolling back above block ${ancestorBlock}`);
+    await this.ingestionService.ingest({
+      schemaVersion: 1,
+      eventId: `chain-reorg:${evidence.blockNumber}:${evidence.blockHash}`,
+      occurredAt: new Date().toISOString(),
+      eventType: "chain-reorg",
+      revertedBlockNumber: evidence.blockNumber.toString(),
+      revertedBlockHash: evidence.blockHash as Hex,
+      ancestorBlockNumber: ancestorBlock.toString(),
+      reason: "checkpoint block hash no longer canonical",
+    } as BotEvent);
+
+    // Rewind only after the backend accepted the rollback, so a failure retries from the same state.
+    await ChainCheckpoint.deleteMany({ blockNumber: { $gt: ancestorBlock } });
   }
 
   /** True if the order's cell is still unspent on-chain; reconciles DB state otherwise. */
@@ -437,9 +446,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return;
 
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `trade-confirmed:${txHash}`,
+      eventId: `trade-confirmed:${txHash}:${pendingTx.blockHash}`,
       occurredAt: new Date().toISOString(),
       transactionHash: txHash,
       blockNumber: pendingTx.blockNumber.toString(),
@@ -464,6 +473,17 @@ export default class DexOrderBot implements DexOrderBotTrait {
         confirmedAtBlock: pendingTx.blockNumber.toString(),
       },
     } as BotEvent);
+  }
+
+  /** Ingests an event; "not buried deep enough yet" is expected and simply retried next tick. */
+  private async emit(event: BotEvent): Promise<boolean> {
+    try {
+      await this.ingestionService.ingest(event);
+      return true;
+    } catch (err) {
+      if (err instanceof AppError && err.statusCode === 409) return false;
+      throw err;
+    }
   }
 
   private async matchPendingOrders(): Promise<void> {
@@ -493,17 +513,18 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   private async resolveScanCursor(): Promise<bigint> {
-    if (this.lastScannedBlock !== undefined) {
-      return this.lastScannedBlock + 1n;
-    }
+    const [checkpoint] = await ChainCheckpoint.find().sort({ blockNumber: -1 }).limit(1).lean();
+    if (checkpoint) return BigInt(checkpoint.blockNumber) + 1n;
 
+    // Fresh checkpoint store (first run after upgrade): resume from the newest indexed order.
     const [latest] = await Order.find().sort({ blockNumber: -1 }).limit(1);
     return latest ? BigInt(latest.blockNumber) + 1n : 0n;
   }
 
   private async indexOrderCell(cell: ccc.Cell): Promise<OrderDoc | undefined> {
     const id = `${cell.outPoint.txHash}:${cell.outPoint.index}`;
-    if (await Order.exists({ _id: id })) return undefined;
+    const known = await Order.findById(id, { status: 1 }).lean();
+    if (known && known.status !== "ORPHANED") return undefined;
 
     let decoded: DecodedDexOrderArgs;
     try {
@@ -560,12 +581,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const ownerAddress = ccc.Address.fromScript(ownerLock, this.client).toString();
 
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `order-confirmed:${id}:${creatingTx.blockNumber}`,
+      eventId: `order-confirmed:${id}:${creatingTx.blockHash}`,
       occurredAt: new Date().toISOString(),
       transactionHash: cell.outPoint.txHash,
       blockNumber: creatingTx.blockNumber.toString(),
+      blockHash: creatingTx.blockHash,
       eventType: "order-confirmed",
       outPoint: { txHash: cell.outPoint.txHash, index: cell.outPoint.index.toString() },
       order: {
@@ -599,24 +621,33 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private async reconcileSpentOrder(order: OrderDoc): Promise<void> {
     if (order.status === "FILLED" || order.status === "CANCELED") return;
 
+    // Orders with identical terms share one lock script, so a lock-indexed input record may
+    // belong to a sibling order: only a committed tx that spends *this* outpoint counts.
     let spendingTxHash: Hex | undefined;
+    let spendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>;
     for await (const record of this.client.findTransactionsByLock(
       order.lockScript,
       null,
       false,
       "asc",
     )) {
-      if (record.isInput) {
+      if (!record.isInput) continue;
+      const candidate = await this.client.getTransaction(record.txHash);
+      if (candidate?.status !== "committed") continue;
+      const spendsOrder = candidate.transaction.inputs.some(
+        (input) =>
+          input.previousOutput.txHash === order.outPoint!.txHash &&
+          input.previousOutput.index.toString() === order.outPoint!.index.toString(),
+      );
+      if (spendsOrder) {
         spendingTxHash = record.txHash;
+        spendingTx = candidate;
         break;
       }
     }
 
     // The indexer hasn't caught up with the spend yet; try again on the next sweep.
-    if (!spendingTxHash) return;
-
-    const spendingTx = await this.client.getTransaction(spendingTxHash);
-    if (!spendingTx || spendingTx.status !== "committed") return;
+    if (!spendingTxHash || !spendingTx) return;
 
     // Mirrors the contract's own rule: the spend is a maker cancellation iff one of its
     // inputs carries the maker's lock hash; otherwise it's a match settlement.
@@ -626,7 +657,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
     );
 
     if (!cancellationInput) {
-      await this.markAsResolved(order._id!, "FILLED", spendingTxHash);
+      // Settled by another matcher (or a replaced transaction of ours): record it as a trade
+      // through ingestion so it is chain-verified and buried before the orders turn FILLED.
+      await this.confirmExternalSettlement(spendingTx);
       return;
     }
 
@@ -634,9 +667,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
     // use, rather than writing the status directly - that's what actually pushes the WS
     // update (emitMakerOrders/emitOrderbook), not just the DB write.
     if (spendingTx.blockNumber === undefined || !spendingTx.blockHash) return;
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `order-cancelled:${spendingTxHash}:${order._id}`,
+      eventId: `order-cancelled:${spendingTxHash}:${spendingTx.blockHash}:${order._id}`,
       occurredAt: new Date().toISOString(),
       transactionHash: spendingTxHash,
       blockNumber: spendingTx.blockNumber.toString(),
@@ -644,6 +677,44 @@ export default class DexOrderBot implements DexOrderBotTrait {
       eventType: "order-cancelled",
       outPoint: { txHash: order.outPoint!.txHash as Hex, index: order.outPoint!.index.toString() },
       cancelledByTxHash: spendingTxHash,
+    } as BotEvent);
+  }
+
+  /** Emits trade-confirmed for a committed settlement that consumed two orders we track. */
+  private async confirmExternalSettlement(
+    spendingTx: NonNullable<Awaited<ReturnType<ccc.Client["getTransaction"]>>>,
+  ): Promise<void> {
+    if (spendingTx.blockNumber === undefined || !spendingTx.blockHash) return;
+
+    const spentIds = spendingTx.transaction.inputs.map(
+      (input) => `${input.previousOutput.txHash}:${input.previousOutput.index}`,
+    );
+    const orders = await Order.find({ _id: { $in: spentIds } });
+    const buyOrder = orders.find((candidate) => candidate.direction === "BID");
+    const sellOrder = orders.find((candidate) => candidate.direction === "ASK");
+    if (!buyOrder || !sellOrder) return; // the counterpart is unknown to us; nothing safe to record
+
+    const txHash = spendingTx.transaction.hash() as Hex;
+    await this.emit({
+      schemaVersion: 1,
+      eventId: `trade-confirmed:${txHash}:${spendingTx.blockHash}`,
+      occurredAt: new Date().toISOString(),
+      transactionHash: txHash,
+      blockNumber: spendingTx.blockNumber.toString(),
+      blockHash: spendingTx.blockHash,
+      eventType: "trade-confirmed",
+      buyOrderOutPoint: { txHash: buyOrder.outPoint!.txHash as Hex, index: buyOrder.outPoint!.index.toString() },
+      sellOrderOutPoint: { txHash: sellOrder.outPoint!.txHash as Hex, index: sellOrder.outPoint!.index.toString() },
+      trade: {
+        settlementTxHash: txHash,
+        buyerLockHash: buyOrder.ownerLockHash as Hex,
+        sellerLockHash: sellOrder.ownerLockHash as Hex,
+        xudtTypeHash: sellOrder.xudtTypeHash as Hex,
+        tokenAmount: sellOrder.remainingAmount.toString(),
+        price: sellOrder.pricePerToken.toString(),
+        paidCapacity: sellOrder.pricePerToken.toString(),
+        confirmedAtBlock: spendingTx.blockNumber.toString(),
+      },
     } as BotEvent);
   }
 

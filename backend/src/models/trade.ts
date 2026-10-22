@@ -1,6 +1,8 @@
 // Defines the immutable MongoDB projection for a confirmed settlement trade.
 import mongoose, { Schema } from "mongoose";
 
+export type TradeStatus = "CONFIRMED" | "REVERTED";
+
 export interface TradeDocument {
   _id: string;
   settlementTxHash: string;
@@ -21,6 +23,8 @@ export interface TradeDocument {
   blockNumber: string;
   blockHash: string;
   confirmedAtBlock: string;
+  /** REVERTED once the block that confirmed the settlement is reorged out. */
+  status: TradeStatus;
   lastEventId: string;
   createdAt: Date;
   updatedAt: Date;
@@ -46,9 +50,10 @@ export const TradeSchema = new Schema<TradeDocument>(
     tokenAmount: { type: String, required: true, immutable: true },
     price: { type: String, required: true, immutable: true },
     paidCapacity: { type: String, required: true, immutable: true },
-    blockNumber: { type: String, required: true, immutable: true },
-    blockHash: { type: String, required: true, immutable: true },
-    confirmedAtBlock: { type: String, required: true, immutable: true },
+    blockNumber: { type: String, required: true },
+    blockHash: { type: String, required: true },
+    confirmedAtBlock: { type: String, required: true },
+    status: { type: String, enum: ["CONFIRMED", "REVERTED"], required: true, default: "CONFIRMED" },
     lastEventId: { type: String, required: true },
   },
   { timestamps: true },
