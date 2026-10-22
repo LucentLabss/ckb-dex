@@ -1,5 +1,6 @@
 import { ccc } from "@ckb-ccc/core";
-import FaucetClaim from "../models/claim.js";
+import ClaimStore from "./claims.js";
+import Mutex from "../utils/mutex.js";
 import AppError from "./error.js";
 import { Config, Hex } from "../types.js";
 import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment } from "../../../shared/deployment.mjs";
@@ -10,12 +11,20 @@ import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment }
  * no pooled balance to run dry - only the issuer's CKB balance, which funds each output's
  * capacity and the tx fee, needs periodic top-ups from a public testnet CKB faucet).
  */
+/** A reservation that never reached "sent" this long ago is assumed abandoned. */
+const RESERVATION_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_ADDRESS_LENGTH = 256;
+
 export default class TokenFaucet {
   readonly config: Config;
 
   private readonly client: ccc.Client;
   private readonly signer: ccc.SignerCkbPrivateKey;
   private readonly xudtCellDeps: ccc.CellDepLike[];
+
+  readonly claims: ClaimStore;
+  // One send at a time: concurrent builds would pick the same issuer cells and double-spend.
+  private readonly sendLock = new Mutex();
 
   private issuerLock: ccc.Script | undefined;
   private issuerLockHash: Hex | undefined;
@@ -24,13 +33,20 @@ export default class TokenFaucet {
     this.config = config;
 
     const deployment = getDeployment(config.ckbNetwork);
-    if (deployment.network === "mainnet") {
-      throw new Error("The demo faucet is not available on mainnet");
+    if (deployment.network !== "testnet") {
+      throw new Error(`The demo faucet only runs on testnet (manifest network: ${deployment.network})`);
     }
     this.client = createDeploymentClient(ccc, deployment, config.ckbRpcUrl);
     this.signer = new ccc.SignerCkbPrivateKey(this.client, config.issuerPrivateKey);
     const xudt = deployment.knownScripts.XUdt;
     this.xudtCellDeps = xudt.cellDeps.map(({ cellDep }) => cellDep);
+    this.claims = new ClaimStore({
+      cooldownMs: config.cooldownHours * 60 * 60 * 1000,
+      reservationTimeoutMs: RESERVATION_TIMEOUT_MS,
+      dripAmount: config.dripAmount,
+      dailyMaxClaims: config.dailyMaxClaims,
+      dailyMaxTokens: config.dailyMaxTokens,
+    });
   }
 
   /** Verify the chain and issuer against the shared deployment before serving claims. */
@@ -60,27 +76,53 @@ export default class TokenFaucet {
   }
 
   /**
-   * Sends `config.dripAmount` of the demo token to `addressLike`, subject to the
-   * per-recipient cooldown. Returns the settlement tx hash.
+   * Sends `config.dripAmount` of the demo token to `addressLike`, subject to the per-recipient
+   * cooldown and the global daily budget. The cooldown and budget are reserved atomically
+   * before anything is sent and rolled back if the send fails. Returns the tx hash.
    */
   async claim(addressLike: string): Promise<Hex> {
-    const recipient = await ccc.Address.fromString(addressLike, this.client);
-    const recipientLock = recipient.script;
+    if (addressLike.length > MAX_ADDRESS_LENGTH) {
+      throw new AppError(400, "Invalid address");
+    }
+
+    let recipientLock: ccc.Script;
+    try {
+      recipientLock = (await ccc.Address.fromString(addressLike, this.client)).script;
+    } catch {
+      throw new AppError(400, "Invalid address for this network");
+    }
     const lockHash = recipientLock.hash() as Hex;
 
-    const existing = await FaucetClaim.findById(lockHash);
-    const cooldownMs = this.config.cooldownHours * 60 * 60 * 1000;
-    if (existing) {
-      const elapsedMs = Date.now() - existing.lastClaimedAt.getTime();
-      if (elapsedMs < cooldownMs) {
-        const retryAfterSeconds = Math.ceil((cooldownMs - elapsedMs) / 1000);
-        throw new AppError(
-          429,
-          `This address already claimed - try again in ${retryAfterSeconds}s`,
-        );
+    const reservation = await this.claims.reserve(lockHash, addressLike);
+
+    let txHash: Hex;
+    try {
+      txHash = await this.sendLock.run(() => this.send(recipientLock));
+    } catch (error) {
+      await this.claims.release(reservation).catch((releaseError) => {
+        console.error("Failed to release a faucet reservation", releaseError);
+      });
+      throw error;
+    }
+
+    // The transaction is out: from here the claim counts even if bookkeeping hiccups, so retry
+    // rather than release.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.claims.commit(reservation, txHash);
+        break;
+      } catch (error) {
+        if (attempt >= 3) {
+          console.error(`Faucet claim ${txHash} sent but not recorded`, error);
+          break;
+        }
       }
     }
 
+    return txHash;
+  }
+
+  private async send(recipientLock: ccc.Script): Promise<Hex> {
     const tokenData = ccc.numLeToBytes(this.config.dripAmount, 16);
 
     const tx = ccc.Transaction.from({
@@ -93,17 +135,6 @@ export default class TokenFaucet {
     await tx.completeInputsByCapacity(this.signer);
     await tx.completeFeeBy(this.signer, 1_000);
 
-    const txHash = (await this.signer.sendTransaction(tx)) as Hex;
-
-    await FaucetClaim.findByIdAndUpdate(
-      lockHash,
-      {
-        $set: { address: addressLike, lastClaimedAt: new Date(), lastTxHash: txHash },
-        $inc: { claimCount: 1 },
-      },
-      { upsert: true },
-    );
-
-    return txHash;
+    return (await this.signer.sendTransaction(tx)) as Hex;
   }
 }

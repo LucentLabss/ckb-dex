@@ -2,10 +2,12 @@ services:
   database:
     image: mongo:7
     restart: unless-stopped
+    # Single-node replica set: the backend's ingestion transactions require one.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'database:27017'}]}).ok }"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -24,7 +26,7 @@ services:
       - ./backend/.env
     environment:
       - NODE_ENV=production
-      - MONGO_DB_URL=mongodb://database:27017/ckb-dex
+      - MONGO_DB_URL=mongodb://database:27017/ckb-dex?replicaSet=rs0
 
   faucet:
     build:
@@ -40,7 +42,7 @@ services:
       - ./faucet/.env
     environment:
       - NODE_ENV=production
-      - MONGO_DB_URL=mongodb://database:27017/ckb-dex-faucet
+      - MONGO_DB_URL=mongodb://database:27017/ckb-dex-faucet?replicaSet=rs0
 
 volumes:
   mongo-data:

@@ -75,6 +75,8 @@ export const chainReorgEventSchema = botEventBaseSchema.extend({
   eventType: z.literal("chain-reorg"),
   revertedBlockHash: hashSchema,
   revertedBlockNumber: z.string().min(1),
+  /** Last block known to be canonical; everything above it is rolled back. Defaults to revertedBlockNumber - 1. */
+  ancestorBlockNumber: z.string().min(1).optional(),
   reason: z.string().min(1).optional(),
 });
 

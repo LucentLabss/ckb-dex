@@ -2,75 +2,21 @@
 import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
+import ChainCheckpoint from "../models/checkpoint.js";
 import { Config, Hex, Script } from "../types/index.js";
 import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
 import { EventIngestionService } from "../services/event-ingestion.js";
 import { toBuffer, toHex } from "../utils/index.js";
 import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment, assertDexConfiguration } from "../../../shared/deployment.mjs";
+import { MatchHealth, ORDER_QUARANTINE_MS } from "./match-health.js";
 import { allocateSettlementCapacity } from "../../../shared/settlement-capacity.mjs";
 
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 
-/**
- * dex-order-lock args (see smart-contract/contracts/dex-order-lock/src/main.rs):
- *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32) + tokenAmount(16, LE) + price(8, LE)
- * The owner lock isn't embedded on-chain - it's recovered from the creating tx's inputs
- * (see findInputWithLockHash), since the lock script never runs at cell creation.
- */
-const ORDER_VERSION = 1;
-const SIDE_BUY = 0;
-const SIDE_SELL = 1;
-
-const HASH_LEN = 32;
-const AMOUNT_LEN = 16;
-const PRICE_LEN = 8;
-const ORDER_ARGS_LEN = 1 + 1 + HASH_LEN + HASH_LEN + AMOUNT_LEN + PRICE_LEN;
-
-export interface DecodedDexOrderArgs {
-  makerLockHash: Hex;
-  direction: "ASK" | "BID";
-  udtTypeHash: Hex;
-  tokenAmount: bigint;
-  pricePerToken: bigint;
-}
-
-function decodeDexOrderArgs(args: Hex): DecodedDexOrderArgs {
-  const buf = toBuffer(args);
-  if (buf.length !== ORDER_ARGS_LEN) {
-    throw new AppError(
-      400,
-      `dex order args must be ${ORDER_ARGS_LEN} bytes, got ${buf.length}`,
-    );
-  }
-
-  const version = buf.readUInt8(0);
-  if (version !== ORDER_VERSION) {
-    throw new AppError(400, `unsupported dex order args version ${version}`);
-  }
-
-  const side = buf.readUInt8(1);
-  if (side !== SIDE_BUY && side !== SIDE_SELL) {
-    throw new AppError(400, `unknown order side byte ${side}`);
-  }
-
-  let offset = 2;
-  const makerLockHash = toHex(buf.subarray(offset, offset + HASH_LEN));
-  offset += HASH_LEN;
-  const udtTypeHash = toHex(buf.subarray(offset, offset + HASH_LEN));
-  offset += HASH_LEN;
-  const tokenAmount = ccc.numLeFromBytes(toHex(buf.subarray(offset, offset + AMOUNT_LEN)));
-  offset += AMOUNT_LEN;
-  const pricePerToken = buf.readBigUInt64LE(offset);
-
-  return {
-    makerLockHash,
-    direction: side === SIDE_SELL ? "ASK" : "BID",
-    udtTypeHash,
-    tokenAmount,
-    pricePerToken,
-  };
-}
+export { decodeDexOrderArgs } from "../utils/dex-order-args.js";
+export type { DecodedDexOrderArgs } from "../utils/dex-order-args.js";
+import { decodeDexOrderArgs, type DecodedDexOrderArgs } from "../utils/dex-order-args.js";
 
 interface DexOrderBotTrait {
   readonly config: Config;
@@ -91,6 +37,10 @@ interface DexOrderBotTrait {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+/** Checkpoints kept, and how many are compared per tick when looking for the fork point. */
+const CHECKPOINT_RETENTION = 500;
+const CHECKPOINT_WINDOW = 50;
+const MAX_MATCHES_PER_TICK = 10;
 const RESERVATION_TTL_MS = 5 * 60 * 1_000;
 // Matches the fixed fee rate the UI uses for its own order transactions (see ui/src/lib/dex.ts).
 const SETTLEMENT_FEE_RATE = 1_000n;
@@ -106,7 +56,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
-  private lastScannedBlock: bigint | undefined;
+  private _health: MatchHealth | undefined;
+  private ticking = false;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(config: Config, pollInterval: number = DEFAULT_POLL_INTERVAL_MS) {
@@ -135,8 +86,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (this.pollTimer) return;
 
     const tick = async () => {
+      // A slow tick (RPC stalls, many orders) must not overlap the next one: two concurrent
+      // ticks would race to reserve and settle the same orders.
+      if (this.ticking) return;
+      this.ticking = true;
       try {
         await this.init();
+        await this.detectReorg();
         await this.scanForPendingOrders();
         await this.sweepTrackedOrders();
         await this.retryFailSwaps();
@@ -144,6 +100,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
         await this.matchPendingOrders();
       } catch (err) {
         console.error("DexOrderBot poll cycle failed:", err);
+      } finally {
+        this.ticking = false;
       }
     };
 
@@ -196,8 +154,16 @@ export default class DexOrderBot implements DexOrderBotTrait {
    */
   async scanForPendingOrders(): Promise<OrderDoc[]> {
     const tip = await this.client.getTip();
+    // Only blocks buried `confirmationDepth` deep are indexed, so shallow reorgs never reach the DB.
+    const safeTip = tip - BigInt(this.config.confirmationDepth);
+    if (safeTip < 0n) return [];
+
     const fromBlock = await this.resolveScanCursor();
-    if (fromBlock > tip) return [];
+    if (fromBlock > safeTip) return [];
+
+    // Pin the end block's hash before scanning; if it changes mid-scan the range is unreliable.
+    const endHash = (await this.client.getHeaderByNumberNoCache(safeTip))?.hash as Hex | undefined;
+    if (!endHash) return [];
 
     const dexLockTemplate: Script = {
       codeHash: this.config.dexOrderLockScript.codeHash,
@@ -213,7 +179,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       script: dexLockTemplate,
       scriptType: "lock",
       scriptSearchMode: "prefix",
-      filter: { blockRange: [fromBlock, tip + 1n] },
+      filter: { blockRange: [fromBlock, safeTip + 1n] },
       withData: true,
     };
 
@@ -222,8 +188,61 @@ export default class DexOrderBot implements DexOrderBotTrait {
       if (order) discovered.push(order);
     }
 
-    this.lastScannedBlock = tip;
+    const endHashAfter = (await this.client.getHeaderByNumberNoCache(safeTip))?.hash;
+    if (endHashAfter !== endHash) return discovered; // reorged mid-scan: leave the cursor, rescan next tick
+
+    await this.saveCheckpoint(safeTip, endHash);
     return discovered;
+  }
+
+  /** Records the scanned block's hash (the persisted cursor) and trims history beyond the window. */
+  private async saveCheckpoint(blockNumber: bigint, blockHash: Hex): Promise<void> {
+    await ChainCheckpoint.updateOne(
+      { blockNumber: Number(blockNumber) },
+      { $set: { blockHash } },
+      { upsert: true },
+    );
+    await ChainCheckpoint.deleteMany({ blockNumber: { $lt: Number(blockNumber) - CHECKPOINT_RETENTION } });
+  }
+
+  /**
+   * Compares stored checkpoint hashes with the canonical chain. On a mismatch, tells the
+   * backend to roll back everything above the last common block, then rewinds the cursor.
+   */
+  async detectReorg(): Promise<void> {
+    const checkpoints = await ChainCheckpoint.find().sort({ blockNumber: -1 }).limit(CHECKPOINT_WINDOW).lean();
+    if (checkpoints.length === 0) return;
+
+    let ancestor: number | undefined;
+    let evidence: { blockNumber: number; blockHash: string } | undefined;
+    for (const checkpoint of checkpoints) {
+      const canonical = (await this.client.getHeaderByNumberNoCache(checkpoint.blockNumber))?.hash;
+      if (canonical === checkpoint.blockHash) {
+        ancestor = checkpoint.blockNumber;
+        break;
+      }
+      evidence = checkpoint;
+    }
+    if (!evidence) return; // newest checkpoint is still canonical
+
+    // No common block inside the window: assume the fork point is just below its oldest entry.
+    const oldest = checkpoints[checkpoints.length - 1].blockNumber;
+    const ancestorBlock = ancestor ?? oldest - 1;
+
+    console.warn(`DexOrderBot detected a reorg: rolling back above block ${ancestorBlock}`);
+    await this.ingestionService.ingest({
+      schemaVersion: 1,
+      eventId: `chain-reorg:${evidence.blockNumber}:${evidence.blockHash}`,
+      occurredAt: new Date().toISOString(),
+      eventType: "chain-reorg",
+      revertedBlockNumber: evidence.blockNumber.toString(),
+      revertedBlockHash: evidence.blockHash as Hex,
+      ancestorBlockNumber: ancestorBlock.toString(),
+      reason: "checkpoint block hash no longer canonical",
+    } as BotEvent);
+
+    // Rewind only after the backend accepted the rollback, so a failure retries from the same state.
+    await ChainCheckpoint.deleteMany({ blockNumber: { $gt: ancestorBlock } });
   }
 
   /** True if the order's cell is still unspent on-chain; reconciles DB state otherwise. */
@@ -311,6 +330,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       throw new AppError(
         409,
         `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell + the network fee`,
+        "INSUFFICIENT_BUY_CAPACITY",
       );
     }
 
@@ -336,19 +356,29 @@ export default class DexOrderBot implements DexOrderBotTrait {
         throw new AppError(409, "one of the matched orders was already settled on-chain");
       }
 
-      const txHash = await this.client.sendTransaction(tx);
+      const txHash = await this.submit(tx);
 
-      await this.ingestionService.ingest({
-        schemaVersion: 1,
-        eventId: `settlement-submitted:${txHash}`,
-        occurredAt: new Date().toISOString(),
-        eventType: "settlement-submitted",
-        orderOutPoints: [
-          { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
-          { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
-        ],
-        settlementTxHash: txHash,
-      } as BotEvent);
+      try {
+        await this.ingestionService.ingest({
+          schemaVersion: 1,
+          eventId: `settlement-submitted:${txHash}`,
+          occurredAt: new Date().toISOString(),
+          eventType: "settlement-submitted",
+          orderOutPoints: [
+            { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
+            { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
+          ],
+          settlementTxHash: txHash,
+        } as BotEvent);
+      } catch (ingestErr) {
+        // The transaction is already in the pool: releasing the orders now would let the bot
+        // build a competing settlement. Track it as pending so reconciliation resolves it.
+        console.error(`settlement ${txHash} submitted but not recorded; tracking directly`, ingestErr);
+        await Order.updateMany(
+          { _id: { $in: [reservedBuy._id!, reservedSell._id!] } },
+          { $set: { status: "PENDING", pendingTxHash: txHash, settlementTxHash: txHash } },
+        );
+      }
 
       return txHash;
     } catch (err) {
@@ -356,6 +386,29 @@ export default class DexOrderBot implements DexOrderBotTrait {
         this.revertToLive(reservedBuy._id!),
         this.revertToLive(reservedSell._id!),
       ]);
+      throw err;
+    }
+  }
+
+  /**
+   * Sends the settlement, translating node rejections caused by other matchers racing us:
+   * an identical tx already in the pool is success; a spent input or a conflicting pool tx
+   * means someone else is settling these orders.
+   */
+  private async submit(tx: ccc.Transaction): Promise<Hex> {
+    try {
+      return await this.client.sendTransaction(tx);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/duplicat/i.test(message)) {
+        return tx.hash() as Hex; // the same transaction is already pending: adopt it
+      }
+      if (/Dead|Unknown\(OutPoint|FailedToResolve|Resolve/i.test(message)) {
+        throw new AppError(409, "a matched order cell was already spent on-chain", "ORDER_SPENT");
+      }
+      if (/RBF|conflict|PoolRejected/i.test(message)) {
+        throw new AppError(409, "a competing settlement for these orders is already pending", "COMPETING_SETTLEMENT");
+      }
       throw err;
     }
   }
@@ -383,6 +436,38 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /**
+   * Every non-overlapping exact-match pair, best priority first. Quarantined orders and pairs
+   * in backoff are skipped, so a pair that keeps failing never hides the other matches.
+   */
+  findMatches(orders: OrderDoc[], now: number = Date.now()): Array<{ buy: OrderDoc; sell: OrderDoc }> {
+    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+    for (const order of this.sort(orders)) {
+      if (this.health.isOrderQuarantined(order._id!, now)) continue;
+      const key = this.matchGroupKey(order);
+      const bucket = groups.get(key) ?? { buys: [], sells: [] };
+      (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
+      groups.set(key, bucket);
+    }
+
+    const pairs: Array<{ buy: OrderDoc; sell: OrderDoc }> = [];
+    for (const { buys, sells } of groups.values()) {
+      const taken = new Set<string>();
+      for (const buy of buys) {
+        const sell = sells.find((candidate) =>
+          !taken.has(candidate._id!) && !this.health.isPairBlocked(buy._id!, candidate._id!, now));
+        if (!sell) continue;
+        taken.add(sell._id!);
+        pairs.push({ buy, sell });
+      }
+    }
+    return pairs;
+  }
+
+  private get health(): MatchHealth {
+    return (this._health ??= new MatchHealth());
+  }
+
+  /**
    * Reconciles every in-flight RESERVED/PENDING order: confirms it, reverts it to LIVE, or
    * leaves it be. Confirmation is checked every call regardless of `reservedUntil` - that
    * field only bounds how long a stuck reservation is kept before giving up on it.
@@ -400,12 +485,18 @@ export default class DexOrderBot implements DexOrderBotTrait {
       const pendingTx = await this.client.getTransaction(order.pendingTxHash as Hex);
 
       if (pendingTx?.status === "committed") {
-        await this.confirmTrade(order, pendingTx);
+        const recorded = await this.confirmTrade(order, pendingTx);
+        // A leg that lost its counterpart (released, or reconciled separately) can never finish.
+        if (!recorded && expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
       if (!pendingTx || pendingTx.status === "rejected") {
-        if (expired(order)) await this.revertToLive(order._id!);
+        // Our settlement is gone (dropped, rejected, or replaced). If another matcher's
+        // transaction consumed the cell, reconcile that now instead of waiting out the TTL.
+        if (!(await this.checkOrderLiveness(order))) continue;
+        // "rejected" is final; "unknown" might just be node lag, so it waits for the TTL.
+        if (pendingTx?.status === "rejected" || expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
@@ -421,25 +512,25 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /** Resolves both legs of a confirmed settlement as FILLED and records the trade. */
-  private async confirmTrade(order: OrderDoc, pendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>): Promise<void> {
+  private async confirmTrade(order: OrderDoc, pendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>): Promise<boolean> {
     const counterpart = await Order.findOne({
       pendingTxHash: order.pendingTxHash,
       _id: { $ne: order._id },
     });
     if (!counterpart) {
       // The other leg isn't visible yet (e.g. a replica lag) - retry next tick.
-      return;
+      return false;
     }
 
     const buyOrder = order.direction === "BID" ? order : counterpart;
     const sellOrder = order.direction === "BID" ? counterpart : order;
     const txHash = order.pendingTxHash as Hex;
 
-    if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return;
+    if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return false;
 
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `trade-confirmed:${txHash}`,
+      eventId: `trade-confirmed:${txHash}:${pendingTx.blockHash}`,
       occurredAt: new Date().toISOString(),
       transactionHash: txHash,
       blockNumber: pendingTx.blockNumber.toString(),
@@ -464,20 +555,55 @@ export default class DexOrderBot implements DexOrderBotTrait {
         confirmedAtBlock: pendingTx.blockNumber.toString(),
       },
     } as BotEvent);
+    // Not yet buried deep enough counts as handled: it is simply retried on a later tick.
+    return true;
+  }
+
+  /** Ingests an event; "not buried deep enough yet" is expected and simply retried next tick. */
+  private async emit(event: BotEvent): Promise<boolean> {
+    try {
+      await this.ingestionService.ingest(event);
+      return true;
+    } catch (err) {
+      if (err instanceof AppError && err.statusCode === 409) return false;
+      throw err;
+    }
   }
 
   private async matchPendingOrders(): Promise<void> {
-    const match = this.findMatch(this._pendingPairOrders);
-    if (!match) return;
+    const live = new Set(this._pendingPairOrders.map((order) => order._id!));
+    this.health.prune(live);
 
-    try {
-      const txHash = await this.executeTrade(match.buy, match.sell);
-      console.info(
-        `DexOrderBot matched buy ${match.buy._id} with sell ${match.sell._id}: ${txHash}`,
-      );
-    } catch (err) {
-      console.error("DexOrderBot match execution failed:", err);
+    for (const { buy, sell } of this.findMatches(this._pendingPairOrders).slice(0, MAX_MATCHES_PER_TICK)) {
+      try {
+        const txHash = await this.executeTrade(buy, sell);
+        this.health.recordSuccess(buy._id!, sell._id!);
+        console.info(`DexOrderBot matched buy ${buy._id} with sell ${sell._id}: ${txHash}`);
+      } catch (err) {
+        await this.handleMatchFailure(buy, sell, err);
+      }
     }
+  }
+
+  /** One failed pair must only penalize itself (or its provably unsettleable order), never the book. */
+  private async handleMatchFailure(buy: OrderDoc, sell: OrderDoc, err: unknown): Promise<void> {
+    const code = err instanceof AppError ? err.code : undefined;
+
+    if (code === "INSUFFICIENT_BUY_CAPACITY") {
+      // The buy cell can never fund a settlement; every sell it would meet fails the same way.
+      this.health.quarantineOrder(buy._id!, ORDER_QUARANTINE_MS);
+    } else if (err instanceof AppError && err.statusCode === 400) {
+      this.health.quarantineOrder(buy._id!);
+      this.health.quarantineOrder(sell._id!);
+    } else {
+      const delay = this.health.recordPairFailure(buy._id!, sell._id!);
+      if (code === "ORDER_SPENT" || code === "COMPETING_SETTLEMENT") {
+        // Someone else is settling one of these: re-check the cells so the DB catches up now.
+        await Promise.allSettled([this.checkOrderLiveness(buy), this.checkOrderLiveness(sell)]);
+      }
+      console.warn(`DexOrderBot pair ${buy._id}/${sell._id} backed off ${delay}ms`);
+    }
+    console.error("DexOrderBot match execution failed:", err);
   }
 
   private matchGroupKey(order: OrderDoc): string {
@@ -493,17 +619,18 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   private async resolveScanCursor(): Promise<bigint> {
-    if (this.lastScannedBlock !== undefined) {
-      return this.lastScannedBlock + 1n;
-    }
+    const [checkpoint] = await ChainCheckpoint.find().sort({ blockNumber: -1 }).limit(1).lean();
+    if (checkpoint) return BigInt(checkpoint.blockNumber) + 1n;
 
+    // Fresh checkpoint store (first run after upgrade): resume from the newest indexed order.
     const [latest] = await Order.find().sort({ blockNumber: -1 }).limit(1);
     return latest ? BigInt(latest.blockNumber) + 1n : 0n;
   }
 
   private async indexOrderCell(cell: ccc.Cell): Promise<OrderDoc | undefined> {
     const id = `${cell.outPoint.txHash}:${cell.outPoint.index}`;
-    if (await Order.exists({ _id: id })) return undefined;
+    const known = await Order.findById(id, { status: 1 }).lean();
+    if (known && known.status !== "ORPHANED") return undefined;
 
     let decoded: DecodedDexOrderArgs;
     try {
@@ -560,12 +687,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const ownerAddress = ccc.Address.fromScript(ownerLock, this.client).toString();
 
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `order-confirmed:${id}:${creatingTx.blockNumber}`,
+      eventId: `order-confirmed:${id}:${creatingTx.blockHash}`,
       occurredAt: new Date().toISOString(),
       transactionHash: cell.outPoint.txHash,
       blockNumber: creatingTx.blockNumber.toString(),
+      blockHash: creatingTx.blockHash,
       eventType: "order-confirmed",
       outPoint: { txHash: cell.outPoint.txHash, index: cell.outPoint.index.toString() },
       order: {
@@ -599,24 +727,33 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private async reconcileSpentOrder(order: OrderDoc): Promise<void> {
     if (order.status === "FILLED" || order.status === "CANCELED") return;
 
+    // Orders with identical terms share one lock script, so a lock-indexed input record may
+    // belong to a sibling order: only a committed tx that spends *this* outpoint counts.
     let spendingTxHash: Hex | undefined;
+    let spendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>;
     for await (const record of this.client.findTransactionsByLock(
       order.lockScript,
       null,
       false,
       "asc",
     )) {
-      if (record.isInput) {
+      if (!record.isInput) continue;
+      const candidate = await this.client.getTransaction(record.txHash);
+      if (candidate?.status !== "committed") continue;
+      const spendsOrder = candidate.transaction.inputs.some(
+        (input) =>
+          input.previousOutput.txHash === order.outPoint!.txHash &&
+          input.previousOutput.index.toString() === order.outPoint!.index.toString(),
+      );
+      if (spendsOrder) {
         spendingTxHash = record.txHash;
+        spendingTx = candidate;
         break;
       }
     }
 
     // The indexer hasn't caught up with the spend yet; try again on the next sweep.
-    if (!spendingTxHash) return;
-
-    const spendingTx = await this.client.getTransaction(spendingTxHash);
-    if (!spendingTx || spendingTx.status !== "committed") return;
+    if (!spendingTxHash || !spendingTx) return;
 
     // Mirrors the contract's own rule: the spend is a maker cancellation iff one of its
     // inputs carries the maker's lock hash; otherwise it's a match settlement.
@@ -626,7 +763,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
     );
 
     if (!cancellationInput) {
-      await this.markAsResolved(order._id!, "FILLED", spendingTxHash);
+      // Settled by another matcher (or a replaced transaction of ours): record it as a trade
+      // through ingestion so it is chain-verified and buried before the orders turn FILLED.
+      await this.confirmExternalSettlement(spendingTx);
       return;
     }
 
@@ -634,9 +773,9 @@ export default class DexOrderBot implements DexOrderBotTrait {
     // use, rather than writing the status directly - that's what actually pushes the WS
     // update (emitMakerOrders/emitOrderbook), not just the DB write.
     if (spendingTx.blockNumber === undefined || !spendingTx.blockHash) return;
-    await this.ingestionService.ingest({
+    await this.emit({
       schemaVersion: 1,
-      eventId: `order-cancelled:${spendingTxHash}:${order._id}`,
+      eventId: `order-cancelled:${spendingTxHash}:${spendingTx.blockHash}:${order._id}`,
       occurredAt: new Date().toISOString(),
       transactionHash: spendingTxHash,
       blockNumber: spendingTx.blockNumber.toString(),
@@ -644,6 +783,44 @@ export default class DexOrderBot implements DexOrderBotTrait {
       eventType: "order-cancelled",
       outPoint: { txHash: order.outPoint!.txHash as Hex, index: order.outPoint!.index.toString() },
       cancelledByTxHash: spendingTxHash,
+    } as BotEvent);
+  }
+
+  /** Emits trade-confirmed for a committed settlement that consumed two orders we track. */
+  private async confirmExternalSettlement(
+    spendingTx: NonNullable<Awaited<ReturnType<ccc.Client["getTransaction"]>>>,
+  ): Promise<void> {
+    if (spendingTx.blockNumber === undefined || !spendingTx.blockHash) return;
+
+    const spentIds = spendingTx.transaction.inputs.map(
+      (input) => `${input.previousOutput.txHash}:${input.previousOutput.index}`,
+    );
+    const orders = await Order.find({ _id: { $in: spentIds } });
+    const buyOrder = orders.find((candidate) => candidate.direction === "BID");
+    const sellOrder = orders.find((candidate) => candidate.direction === "ASK");
+    if (!buyOrder || !sellOrder) return; // the counterpart is unknown to us; nothing safe to record
+
+    const txHash = spendingTx.transaction.hash() as Hex;
+    await this.emit({
+      schemaVersion: 1,
+      eventId: `trade-confirmed:${txHash}:${spendingTx.blockHash}`,
+      occurredAt: new Date().toISOString(),
+      transactionHash: txHash,
+      blockNumber: spendingTx.blockNumber.toString(),
+      blockHash: spendingTx.blockHash,
+      eventType: "trade-confirmed",
+      buyOrderOutPoint: { txHash: buyOrder.outPoint!.txHash as Hex, index: buyOrder.outPoint!.index.toString() },
+      sellOrderOutPoint: { txHash: sellOrder.outPoint!.txHash as Hex, index: sellOrder.outPoint!.index.toString() },
+      trade: {
+        settlementTxHash: txHash,
+        buyerLockHash: buyOrder.ownerLockHash as Hex,
+        sellerLockHash: sellOrder.ownerLockHash as Hex,
+        xudtTypeHash: sellOrder.xudtTypeHash as Hex,
+        tokenAmount: sellOrder.remainingAmount.toString(),
+        price: sellOrder.pricePerToken.toString(),
+        paidCapacity: sellOrder.pricePerToken.toString(),
+        confirmedAtBlock: spendingTx.blockNumber.toString(),
+      },
     } as BotEvent);
   }
 

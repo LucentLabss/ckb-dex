@@ -3,18 +3,22 @@ import { createExpressServer } from "./app.js";
 import DexOrderBot from "./bot/index.js";
 import AppConfiguration from "./config.js";
 import { Database } from "./services/index.js";
+import { backfillSortKeys } from "./services/backfill.js";
+import { createChainVerification, registerChainVerification } from "./services/chain-verifier.js";
 import { Config } from "./types/index.js";
 
 export let config: Config | undefined = undefined;
 
 (async function main() {
   config = await new AppConfiguration().getEnvironment();
+  registerChainVerification(createChainVerification(config));
   const dexOrderBot = new DexOrderBot(config);
   await dexOrderBot.init();
   const databaseConnection = new Database(config.mongodbUrl);
 
   /**Connect to database before any other server startup action */
   await databaseConnection.connect();
+  await backfillSortKeys();
 
   const app = createExpressServer(config, {
     isReady: () => databaseConnection.isConnected(),
@@ -35,6 +39,7 @@ export let config: Config | undefined = undefined;
   const shutdown = async (): Promise<void> => {
     console.info('Shutting down CKB Dex backend API');
     dexOrderBot.stop();
+    await realtime?.close();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) reject(error);

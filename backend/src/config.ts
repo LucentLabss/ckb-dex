@@ -11,9 +11,9 @@ const VALID_CKB_NETWORKS: CkbNetwork[] = ["devnet", "testnet", "mainnet"];
 const DEFAULT_CONFIG = {
     mongodbUrl: "mongodb://127.0.0.1:27017/ckb-dex",
     ckbRpcUrl: "https://testnet.ckb.dev",
-    internalBotToken: "dev-internal-bot-token",
     port: 3000,
     apiVersion: 1,
+    confirmationDepth: 10,
     enviroment: "development" as const,
     dexScriptHashType: "type" as const,
     dexScriptArgs: "0x" as Hex,
@@ -29,6 +29,32 @@ function requireEnv(name: string, value: string | undefined, fallback?: string):
     }
 
     return value;
+}
+
+const MIN_INTERNAL_TOKEN_LENGTH = 32;
+const REJECTED_INTERNAL_TOKENS = new Set([
+    "dev-internal-bot-token",
+    "dev-token",
+    "changeme",
+    "change-me",
+    "secret",
+    "password",
+    "token",
+]);
+
+/** The ingestion token gates writes to the order projection, so it must be set and non-trivial. */
+export function parseInternalBotToken(value: string | undefined): string {
+    const token = value?.trim() ?? "";
+    if (token === "") {
+        throw new AppError(500, "Missing required environment variable: INTERNAL_BOT_TOKEN");
+    }
+    if (REJECTED_INTERNAL_TOKENS.has(token.toLowerCase()) || /^(.)\1*$/.test(token)) {
+        throw new AppError(500, "INTERNAL_BOT_TOKEN must not be a default or placeholder value");
+    }
+    if (token.length < MIN_INTERNAL_TOKEN_LENGTH) {
+        throw new AppError(500, `INTERNAL_BOT_TOKEN must be at least ${MIN_INTERNAL_TOKEN_LENGTH} characters`);
+    }
+    return token;
 }
 
 function parseInteger(name: string, value: string | undefined, fallback?: number): number {
@@ -118,8 +144,9 @@ export default class AppConfiguration implements AppConfig {
             enviroment: parseNodeEnv(envs.NODE_ENV),
             port: parseInteger("PORT", envs.PORT, DEFAULT_CONFIG.port),
             ckbRpcUrl: requireEnv("CKB_RPC_URL", envs.CKB_RPC_URL, DEFAULT_CONFIG.ckbRpcUrl),
-            internalBotToken: requireEnv("INTERNAL_BOT_TOKEN", envs.INTERNAL_BOT_TOKEN, DEFAULT_CONFIG.internalBotToken),
+            internalBotToken: parseInternalBotToken(envs.INTERNAL_BOT_TOKEN),
             apiVersion: parseInteger("API_VERSION", envs.API_VERSION, DEFAULT_CONFIG.apiVersion),
+            confirmationDepth: parseInteger("CONFIRMATION_DEPTH", envs.CONFIRMATION_DEPTH, DEFAULT_CONFIG.confirmationDepth),
         };
 
         return this.config;
