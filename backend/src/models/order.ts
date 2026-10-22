@@ -55,6 +55,13 @@ export interface OrderDocument {
   totalAskCapacity?: string;
   createdAtBlock?: string;
   createdAtTxHash?: string;
+  /**
+   * Numeric shadow keys so the database can sort and page: the string fields above hold
+   * u64-sized values that sort lexicographically. Derived from the strings on ingestion.
+   */
+  priceValue?: mongoose.Types.Decimal128;
+  blockNum?: number;
+  txIdx?: number;
   /** Hash of the block that created the cell; lets a reorg tell re-included orders from reverted ones. */
   createdBlockHash?: string;
   /** Block and hash of the confirmed transaction that spent the cell (fill or cancel). */
@@ -129,6 +136,9 @@ export const OrderSchema = new Schema<OrderDocument>(
     totalAskCapacity: { type: String },
     createdAtBlock: { type: String },
     createdAtTxHash: { type: String },
+    priceValue: { type: Schema.Types.Decimal128 },
+    blockNum: { type: Number },
+    txIdx: { type: Number },
     createdBlockHash: { type: String },
     spentAtBlock: { type: String },
     spentBlockHash: { type: String },
@@ -137,8 +147,14 @@ export const OrderSchema = new Schema<OrderDocument>(
 );
 
 OrderSchema.index({ "outPoint.txHash": 1, "outPoint.index": 1 }, { unique: true });
-OrderSchema.index({ xudtTypeHash: 1, direction: 1, status: 1, pricePerToken: 1, blockNumber: 1, txIndex: 1 });
-OrderSchema.index({ ownerLockHash: 1, createdAt: -1 });
+// Order book: best price first per side (asks ascending, bids descending), then chain order.
+OrderSchema.index({ xudtTypeHash: 1, status: 1, direction: 1, priceValue: 1, blockNum: 1, txIdx: 1, _id: 1 });
+OrderSchema.index({ xudtTypeHash: 1, status: 1, direction: 1, priceValue: -1, blockNum: 1, txIdx: 1, _id: 1 });
+OrderSchema.index({ xudtTypeHash: 1, status: 1, priceValue: 1, blockNum: 1, txIdx: 1, _id: 1 });
+// Listings, newest first.
+OrderSchema.index({ ownerLockHash: 1, createdAt: -1, _id: 1 });
+OrderSchema.index({ xudtTypeHash: 1, createdAt: -1, _id: 1 });
+OrderSchema.index({ status: 1, createdAt: -1, _id: 1 });
 OrderSchema.index({ pendingTxHash: 1 });
 OrderSchema.index({ settlementTxHash: 1 });
 

@@ -23,6 +23,8 @@ export interface TradeDocument {
   blockNumber: string;
   blockHash: string;
   confirmedAtBlock: string;
+  /** Numeric copy of blockNumber so trades can be sorted and paged by the database. */
+  blockNum?: number;
   /** REVERTED once the block that confirmed the settlement is reorged out. */
   status: TradeStatus;
   lastEventId: string;
@@ -53,6 +55,7 @@ export const TradeSchema = new Schema<TradeDocument>(
     blockNumber: { type: String, required: true },
     blockHash: { type: String, required: true },
     confirmedAtBlock: { type: String, required: true },
+    blockNum: { type: Number },
     status: { type: String, enum: ["CONFIRMED", "REVERTED"], required: true, default: "CONFIRMED" },
     lastEventId: { type: String, required: true },
   },
@@ -62,7 +65,8 @@ export const TradeSchema = new Schema<TradeDocument>(
 TradeSchema.index({ settlementTxHash: 1 }, { unique: true });
 TradeSchema.index({ "buyOrderOutPoint.txHash": 1, "buyOrderOutPoint.index": 1 });
 TradeSchema.index({ "sellOrderOutPoint.txHash": 1, "sellOrderOutPoint.index": 1 });
-TradeSchema.index({ xudtTypeHash: 1, confirmedAtBlock: -1 });
+TradeSchema.index({ xudtTypeHash: 1, status: 1, blockNum: -1, _id: 1 });
+TradeSchema.index({ status: 1, blockNum: -1, _id: 1 });
 TradeSchema.index({ sellerLockHash: 1, confirmedAtBlock: -1 });
 
 const TradeModel = mongoose.model<TradeDocument>("Trade", TradeSchema);

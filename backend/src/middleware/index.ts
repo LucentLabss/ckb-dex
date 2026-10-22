@@ -4,6 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import AppError from "../services/error.js";
 import { sendError } from "../utils/index.js";
 import { Config } from "../types/index.js";
+import { ZodError } from "zod";
 
 export function requestContextMiddleware(
 	req: Request,
@@ -26,6 +27,16 @@ export function errorHandler(
 
 	if (error instanceof AppError) {
 		return sendError(res, error.message, { requestId }, error.statusCode);
+	}
+
+	// Bad client input is a 4xx, never an "Internal server error".
+	if (error instanceof ZodError) {
+		const message = error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ");
+		return sendError(res, message, { requestId }, 400);
+	}
+	const httpStatus = (error as { status?: number; type?: string }).status;
+	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500) {
+		return sendError(res, httpStatus === 413 ? "Request body too large" : "Malformed request", { requestId }, httpStatus);
 	}
 
 	console.error("Unhandled error", { requestId, error });
@@ -65,6 +76,50 @@ export function createInternalBotAuthMiddleware(config: Config) {
 			}, 401);
 		}
 
+		return next();
+	};
+}
+
+
+interface RateLimitOptions {
+	windowMs: number;
+	max: number;
+	/** Upper bound on tracked clients so the map itself cannot be used to exhaust memory. */
+	maxClients?: number;
+}
+
+/** Fixed-window per-client request limiter for the public read API. */
+export function createRateLimiter({ windowMs, max, maxClients = 10_000 }: RateLimitOptions) {
+	const windows = new Map<string, { start: number; count: number }>();
+
+	return function rateLimiter(req: Request, res: Response, next: NextFunction) {
+		const now = Date.now();
+		const key = req.ip ?? req.socket.remoteAddress ?? "unknown";
+
+		let entry = windows.get(key);
+		if (!entry || now - entry.start >= windowMs) {
+			if (windows.size >= maxClients) {
+				for (const [client, state] of windows) {
+					if (now - state.start >= windowMs) windows.delete(client);
+				}
+				// Still full of live windows: shed load rather than grow.
+				if (windows.size >= maxClients) {
+					return sendError(res, "Too many requests", { requestId: res.locals.requestId }, 429);
+				}
+			}
+			entry = { start: now, count: 0 };
+			windows.set(key, entry);
+		}
+
+		entry.count += 1;
+		const remaining = Math.max(0, max - entry.count);
+		res.setHeader("x-ratelimit-limit", String(max));
+		res.setHeader("x-ratelimit-remaining", String(remaining));
+
+		if (entry.count > max) {
+			res.setHeader("retry-after", String(Math.ceil((entry.start + windowMs - now) / 1000)));
+			return sendError(res, "Too many requests", { requestId: res.locals.requestId }, 429);
+		}
 		return next();
 	};
 }
