@@ -101,25 +101,9 @@
 }
 
 .startup-message {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-secondary, #b8b8b8);
-}
-
-.startup-bar {
-  width: 160px;
-  height: 3px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--border, #474747);
-}
-
-.startup-bar span {
-  display: block;
-  width: 45%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #ea2690, #0098dc);
-  animation: startup-slide 1.4s ease-in-out infinite;
+  animation: startup-text-in 0.45s ease both;
 }
 
 .startup-hint {
@@ -200,12 +184,14 @@
   }
 }
 
-@keyframes startup-slide {
-  0% {
-    transform: translateX(-110%);
+@keyframes startup-text-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
-  100% {
-    transform: translateX(260%);
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 
@@ -219,7 +205,7 @@
     animation-duration: 4s;
   }
 
-  .startup-bar span {
-    animation-duration: 3s;
+  .startup-message {
+    animation: none;
   }
 }
