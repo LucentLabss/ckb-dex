@@ -9,6 +9,7 @@ import AppError from "../services/error.js";
 import { EventIngestionService } from "../services/event-ingestion.js";
 import { toBuffer, toHex } from "../utils/index.js";
 import { getDeployment, getAssetType, createDeploymentClient, verifyDeployment, assertDexConfiguration } from "../../../shared/deployment.mjs";
+import { MatchHealth, ORDER_QUARANTINE_MS } from "./match-health.js";
 import { allocateSettlementCapacity } from "../../../shared/settlement-capacity.mjs";
 
 export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
@@ -39,6 +40,7 @@ const DEFAULT_POLL_INTERVAL_MS = 5_000;
 /** Checkpoints kept, and how many are compared per tick when looking for the fork point. */
 const CHECKPOINT_RETENTION = 500;
 const CHECKPOINT_WINDOW = 50;
+const MAX_MATCHES_PER_TICK = 10;
 const RESERVATION_TTL_MS = 5 * 60 * 1_000;
 // Matches the fixed fee rate the UI uses for its own order transactions (see ui/src/lib/dex.ts).
 const SETTLEMENT_FEE_RATE = 1_000n;
@@ -54,6 +56,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
+  private _health: MatchHealth | undefined;
+  private ticking = false;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(config: Config, pollInterval: number = DEFAULT_POLL_INTERVAL_MS) {
@@ -82,6 +86,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (this.pollTimer) return;
 
     const tick = async () => {
+      // A slow tick (RPC stalls, many orders) must not overlap the next one: two concurrent
+      // ticks would race to reserve and settle the same orders.
+      if (this.ticking) return;
+      this.ticking = true;
       try {
         await this.init();
         await this.detectReorg();
@@ -92,6 +100,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
         await this.matchPendingOrders();
       } catch (err) {
         console.error("DexOrderBot poll cycle failed:", err);
+      } finally {
+        this.ticking = false;
       }
     };
 
@@ -320,6 +330,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       throw new AppError(
         409,
         `buy order ${buyOrder._id} does not carry enough capacity to cover price + its token cell + the network fee`,
+        "INSUFFICIENT_BUY_CAPACITY",
       );
     }
 
@@ -345,19 +356,29 @@ export default class DexOrderBot implements DexOrderBotTrait {
         throw new AppError(409, "one of the matched orders was already settled on-chain");
       }
 
-      const txHash = await this.client.sendTransaction(tx);
+      const txHash = await this.submit(tx);
 
-      await this.ingestionService.ingest({
-        schemaVersion: 1,
-        eventId: `settlement-submitted:${txHash}`,
-        occurredAt: new Date().toISOString(),
-        eventType: "settlement-submitted",
-        orderOutPoints: [
-          { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
-          { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
-        ],
-        settlementTxHash: txHash,
-      } as BotEvent);
+      try {
+        await this.ingestionService.ingest({
+          schemaVersion: 1,
+          eventId: `settlement-submitted:${txHash}`,
+          occurredAt: new Date().toISOString(),
+          eventType: "settlement-submitted",
+          orderOutPoints: [
+            { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
+            { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
+          ],
+          settlementTxHash: txHash,
+        } as BotEvent);
+      } catch (ingestErr) {
+        // The transaction is already in the pool: releasing the orders now would let the bot
+        // build a competing settlement. Track it as pending so reconciliation resolves it.
+        console.error(`settlement ${txHash} submitted but not recorded; tracking directly`, ingestErr);
+        await Order.updateMany(
+          { _id: { $in: [reservedBuy._id!, reservedSell._id!] } },
+          { $set: { status: "PENDING", pendingTxHash: txHash, settlementTxHash: txHash } },
+        );
+      }
 
       return txHash;
     } catch (err) {
@@ -365,6 +386,29 @@ export default class DexOrderBot implements DexOrderBotTrait {
         this.revertToLive(reservedBuy._id!),
         this.revertToLive(reservedSell._id!),
       ]);
+      throw err;
+    }
+  }
+
+  /**
+   * Sends the settlement, translating node rejections caused by other matchers racing us:
+   * an identical tx already in the pool is success; a spent input or a conflicting pool tx
+   * means someone else is settling these orders.
+   */
+  private async submit(tx: ccc.Transaction): Promise<Hex> {
+    try {
+      return await this.client.sendTransaction(tx);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/duplicat/i.test(message)) {
+        return tx.hash() as Hex; // the same transaction is already pending: adopt it
+      }
+      if (/Dead|Unknown\(OutPoint|FailedToResolve|Resolve/i.test(message)) {
+        throw new AppError(409, "a matched order cell was already spent on-chain", "ORDER_SPENT");
+      }
+      if (/RBF|conflict|PoolRejected/i.test(message)) {
+        throw new AppError(409, "a competing settlement for these orders is already pending", "COMPETING_SETTLEMENT");
+      }
       throw err;
     }
   }
@@ -392,6 +436,38 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /**
+   * Every non-overlapping exact-match pair, best priority first. Quarantined orders and pairs
+   * in backoff are skipped, so a pair that keeps failing never hides the other matches.
+   */
+  findMatches(orders: OrderDoc[], now: number = Date.now()): Array<{ buy: OrderDoc; sell: OrderDoc }> {
+    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+    for (const order of this.sort(orders)) {
+      if (this.health.isOrderQuarantined(order._id!, now)) continue;
+      const key = this.matchGroupKey(order);
+      const bucket = groups.get(key) ?? { buys: [], sells: [] };
+      (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
+      groups.set(key, bucket);
+    }
+
+    const pairs: Array<{ buy: OrderDoc; sell: OrderDoc }> = [];
+    for (const { buys, sells } of groups.values()) {
+      const taken = new Set<string>();
+      for (const buy of buys) {
+        const sell = sells.find((candidate) =>
+          !taken.has(candidate._id!) && !this.health.isPairBlocked(buy._id!, candidate._id!, now));
+        if (!sell) continue;
+        taken.add(sell._id!);
+        pairs.push({ buy, sell });
+      }
+    }
+    return pairs;
+  }
+
+  private get health(): MatchHealth {
+    return (this._health ??= new MatchHealth());
+  }
+
+  /**
    * Reconciles every in-flight RESERVED/PENDING order: confirms it, reverts it to LIVE, or
    * leaves it be. Confirmation is checked every call regardless of `reservedUntil` - that
    * field only bounds how long a stuck reservation is kept before giving up on it.
@@ -409,12 +485,18 @@ export default class DexOrderBot implements DexOrderBotTrait {
       const pendingTx = await this.client.getTransaction(order.pendingTxHash as Hex);
 
       if (pendingTx?.status === "committed") {
-        await this.confirmTrade(order, pendingTx);
+        const recorded = await this.confirmTrade(order, pendingTx);
+        // A leg that lost its counterpart (released, or reconciled separately) can never finish.
+        if (!recorded && expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
       if (!pendingTx || pendingTx.status === "rejected") {
-        if (expired(order)) await this.revertToLive(order._id!);
+        // Our settlement is gone (dropped, rejected, or replaced). If another matcher's
+        // transaction consumed the cell, reconcile that now instead of waiting out the TTL.
+        if (!(await this.checkOrderLiveness(order))) continue;
+        // "rejected" is final; "unknown" might just be node lag, so it waits for the TTL.
+        if (pendingTx?.status === "rejected" || expired(order)) await this.revertToLive(order._id!);
         continue;
       }
 
@@ -430,21 +512,21 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /** Resolves both legs of a confirmed settlement as FILLED and records the trade. */
-  private async confirmTrade(order: OrderDoc, pendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>): Promise<void> {
+  private async confirmTrade(order: OrderDoc, pendingTx: Awaited<ReturnType<ccc.Client["getTransaction"]>>): Promise<boolean> {
     const counterpart = await Order.findOne({
       pendingTxHash: order.pendingTxHash,
       _id: { $ne: order._id },
     });
     if (!counterpart) {
       // The other leg isn't visible yet (e.g. a replica lag) - retry next tick.
-      return;
+      return false;
     }
 
     const buyOrder = order.direction === "BID" ? order : counterpart;
     const sellOrder = order.direction === "BID" ? counterpart : order;
     const txHash = order.pendingTxHash as Hex;
 
-    if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return;
+    if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return false;
 
     await this.emit({
       schemaVersion: 1,
@@ -473,6 +555,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
         confirmedAtBlock: pendingTx.blockNumber.toString(),
       },
     } as BotEvent);
+    // Not yet buried deep enough counts as handled: it is simply retried on a later tick.
+    return true;
   }
 
   /** Ingests an event; "not buried deep enough yet" is expected and simply retried next tick. */
@@ -487,17 +571,39 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   private async matchPendingOrders(): Promise<void> {
-    const match = this.findMatch(this._pendingPairOrders);
-    if (!match) return;
+    const live = new Set(this._pendingPairOrders.map((order) => order._id!));
+    this.health.prune(live);
 
-    try {
-      const txHash = await this.executeTrade(match.buy, match.sell);
-      console.info(
-        `DexOrderBot matched buy ${match.buy._id} with sell ${match.sell._id}: ${txHash}`,
-      );
-    } catch (err) {
-      console.error("DexOrderBot match execution failed:", err);
+    for (const { buy, sell } of this.findMatches(this._pendingPairOrders).slice(0, MAX_MATCHES_PER_TICK)) {
+      try {
+        const txHash = await this.executeTrade(buy, sell);
+        this.health.recordSuccess(buy._id!, sell._id!);
+        console.info(`DexOrderBot matched buy ${buy._id} with sell ${sell._id}: ${txHash}`);
+      } catch (err) {
+        await this.handleMatchFailure(buy, sell, err);
+      }
     }
+  }
+
+  /** One failed pair must only penalize itself (or its provably unsettleable order), never the book. */
+  private async handleMatchFailure(buy: OrderDoc, sell: OrderDoc, err: unknown): Promise<void> {
+    const code = err instanceof AppError ? err.code : undefined;
+
+    if (code === "INSUFFICIENT_BUY_CAPACITY") {
+      // The buy cell can never fund a settlement; every sell it would meet fails the same way.
+      this.health.quarantineOrder(buy._id!, ORDER_QUARANTINE_MS);
+    } else if (err instanceof AppError && err.statusCode === 400) {
+      this.health.quarantineOrder(buy._id!);
+      this.health.quarantineOrder(sell._id!);
+    } else {
+      const delay = this.health.recordPairFailure(buy._id!, sell._id!);
+      if (code === "ORDER_SPENT" || code === "COMPETING_SETTLEMENT") {
+        // Someone else is settling one of these: re-check the cells so the DB catches up now.
+        await Promise.allSettled([this.checkOrderLiveness(buy), this.checkOrderLiveness(sell)]);
+      }
+      console.warn(`DexOrderBot pair ${buy._id}/${sell._id} backed off ${delay}ms`);
+    }
+    console.error("DexOrderBot match execution failed:", err);
   }
 
   private matchGroupKey(order: OrderDoc): string {
