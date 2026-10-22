@@ -5,7 +5,9 @@
 class AppError extends Error {
     constructor(
         readonly statusCode: number,
-        message: string
+        message: string,
+        /** Machine-readable reason for callers that branch on the failure (optional). */
+        readonly code?: string,
     ){
         super(message);
         this.statusCode = statusCode
