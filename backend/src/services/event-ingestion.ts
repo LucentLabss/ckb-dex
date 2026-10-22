@@ -1,5 +1,5 @@
 // Applies idempotent bot events to MongoDB order and trade projections while enforcing lifecycle rules.
-import mongoose from "mongoose";
+import mongoose, { ClientSession } from "mongoose";
 import {
   BotEvent,
   ChainReorgEvent,
@@ -40,6 +40,16 @@ const allowedTransitions: Record<OrderStatus, OrderStatus[]> = {
   ORPHANED: ["LIVE", "CANCELED", "CANCELLED", "FILLED", "INVALID"],
 };
 
+/** Per-event write context: every DB call joins `session`; realtime pushes wait for commit. */
+interface ApplyContext {
+  session: ClientSession;
+  afterCommit: Array<() => Promise<unknown>>;
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: number }).code === 11000;
+}
+
 function toOrderId(txHash: string, index: string): string {
   return `${txHash}:${index}`;
 }
@@ -60,8 +70,9 @@ async function persistIngestionEvent(input: {
   event: BotEvent;
   processingStatus: IngestionEventDocument["processingStatus"];
   processingError?: string;
+  session?: ClientSession;
 }): Promise<void> {
-  await IngestionEventModel.create({
+  await IngestionEventModel.create([{
     eventId: input.event.eventId,
     schemaVersion: input.event.schemaVersion,
     eventType: input.event.eventType,
@@ -74,13 +85,14 @@ async function persistIngestionEvent(input: {
     processingStatus: input.processingStatus,
     processingError: input.processingError,
     processedAt: new Date(),
-  });
+  }], { session: input.session });
 }
 
 async function updateOrderStatus(
   order: HydratedDocument<import("../models").OrderDocument>,
   nextStatus: OrderStatus,
   eventId: string,
+  session?: ClientSession,
 ): Promise<void> {
   if (!canTransition(order.status, nextStatus)) {
     throw new Error(`Invalid order transition from ${order.status} to ${nextStatus}`);
@@ -88,7 +100,7 @@ async function updateOrderStatus(
 
   order.status = nextStatus;
   order.lastEventId = eventId;
-  await order.save();
+  await order.save({ session });
 }
 
 export class EventIngestionService {
@@ -105,25 +117,36 @@ export class EventIngestionService {
     }
 
     const session = await mongoose.startSession();
+    let afterCommit: ApplyContext["afterCommit"] = [];
 
     try {
-      session.startTransaction();
+      // The projection update and the dedupe record commit together or not at all.
+      // withTransaction may re-run the callback, so the context is rebuilt each attempt.
+      const result = await session.withTransaction(async () => {
+        const ctx: ApplyContext = { session, afterCommit: [] };
+        const applied = await this.applyEvent(event, ctx);
+        await persistIngestionEvent({
+          event,
+          processingStatus: applied.status,
+          processingError: applied.reason,
+          session,
+        });
+        afterCommit = ctx.afterCommit;
+        return applied;
+      }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
 
-      const result = await this.applyEvent(event);
-
-      await persistIngestionEvent({
-        event,
-        processingStatus: result.status,
-        processingError: result.reason,
-      });
-
-      await session.commitTransaction();
-      return result;
+      // Realtime pushes read committed data, so they run only after the commit.
+      await Promise.allSettled(afterCommit.map((push) => push()));
+      return result as IngestionResult;
     } catch (error) {
-      await session.abortTransaction();
+      // A concurrent delivery of the same event won the unique index: treat as a duplicate.
+      if (isDuplicateKeyError(error)) {
+        return { status: "IGNORED", eventId: event.eventId, reason: "duplicate-event-id" };
+      }
 
       const message = error instanceof Error ? error.message : "unknown-error";
 
+      // Outside the (aborted) transaction so the failure is still auditable.
       try {
         await persistIngestionEvent({
           event,
@@ -140,22 +163,22 @@ export class EventIngestionService {
     }
   }
 
-  private async applyEvent(event: BotEvent): Promise<IngestionResult> {
+  private async applyEvent(event: BotEvent, ctx: ApplyContext): Promise<IngestionResult> {
     switch (event.eventType) {
       case "order-confirmed":
-        return this.applyOrderConfirmed(event);
+        return this.applyOrderConfirmed(event, ctx);
       case "order-cancelled":
-        return this.applyOrderCancelled(event);
+        return this.applyOrderCancelled(event, ctx);
       case "settlement-submitted":
-        return this.applySettlementSubmitted(event);
+        return this.applySettlementSubmitted(event, ctx);
       case "trade-confirmed":
-        return this.applyTradeConfirmed(event);
+        return this.applyTradeConfirmed(event, ctx);
       case "chain-reorg":
-        return this.applyChainReorg(event);
+        return this.applyChainReorg(event, ctx);
     }
   }
 
-  private async applyOrderConfirmed(event: OrderConfirmedEvent): Promise<IngestionResult> {
+  private async applyOrderConfirmed(event: OrderConfirmedEvent, ctx: ApplyContext): Promise<IngestionResult> {
     const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
 
     const updatePayload: Partial<OrderDocument> = {
@@ -187,20 +210,21 @@ export class EventIngestionService {
       { $set: updatePayload },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true,
+        session: ctx.session,
       },
     );
 
-    await Promise.all([
+    ctx.afterCommit.push(() => Promise.all([
       this.realtime.emitOrderbook(event.order.xudtTypeHash),
       this.realtime.emitMakerOrders(event.order.ownerLockHash),
-    ]);
+    ]));
 
     return { status: "APPLIED", eventId: event.eventId };
   }
 
-  private async applyOrderCancelled(event: OrderCancelledEvent): Promise<IngestionResult> {
+  private async applyOrderCancelled(event: OrderCancelledEvent, ctx: ApplyContext): Promise<IngestionResult> {
     if (!hasConfirmation(event)) {
       return {
         status: "IGNORED",
@@ -210,7 +234,7 @@ export class EventIngestionService {
     }
 
     const orderId = toOrderId(event.outPoint.txHash, event.outPoint.index);
-    const order = await OrderModel.findById(orderId);
+    const order = await OrderModel.findById(orderId).session(ctx.session);
 
     if (order == undefined) {
       return {
@@ -220,22 +244,22 @@ export class EventIngestionService {
       };
     }
 
-    await updateOrderStatus(order, "CANCELED", event.eventId);
+    await updateOrderStatus(order, "CANCELED", event.eventId, ctx.session);
     order.confirmedAtBlock = event.blockNumber;
     order.settlementTxHash = event.cancelledByTxHash;
-    await order.save();
+    await order.save({ session: ctx.session });
 
-    await Promise.all([
+    ctx.afterCommit.push(() => Promise.all([
       this.realtime.emitOrderbook(order.xudtTypeHash),
       this.realtime.emitMakerOrders(order.ownerLockHash),
-    ]);
+    ]));
 
     return { status: "APPLIED", eventId: event.eventId };
   }
 
-  private async applySettlementSubmitted(event: SettlementSubmittedEvent): Promise<IngestionResult> {
+  private async applySettlementSubmitted(event: SettlementSubmittedEvent, ctx: ApplyContext): Promise<IngestionResult> {
     const orderIds = event.orderOutPoints.map((outPoint) => toOrderId(outPoint.txHash, outPoint.index));
-    const orders = await OrderModel.find({ _id: { $in: orderIds } });
+    const orders = await OrderModel.find({ _id: { $in: orderIds } }).session(ctx.session);
 
     if (orders.length !== event.orderOutPoints.length) {
       return {
@@ -253,23 +277,26 @@ export class EventIngestionService {
       };
     }
 
-    await Promise.all(orders.map(async (order) => {
+    // Sequential: operations on one transaction session must not run in parallel.
+    for (const order of orders) {
       order.status = "PENDING";
       order.pendingTxHash = event.settlementTxHash;
       order.settlementTxHash = event.settlementTxHash;
       order.lastEventId = event.eventId;
-      await order.save();
-    }));
+      await order.save({ session: ctx.session });
+    }
 
-    await Promise.all([
-      ...new Set(orders.map((order) => order.xudtTypeHash)),
-    ].map((xudtTypeHash) => this.realtime.emitOrderbook(xudtTypeHash)));
-    await Promise.all(orders.map((order) => this.realtime.emitMakerOrders(order.ownerLockHash)));
+    ctx.afterCommit.push(async () => {
+      await Promise.all([
+        ...new Set(orders.map((order) => order.xudtTypeHash)),
+      ].map((xudtTypeHash) => this.realtime.emitOrderbook(xudtTypeHash)));
+      await Promise.all(orders.map((order) => this.realtime.emitMakerOrders(order.ownerLockHash)));
+    });
 
     return { status: "APPLIED", eventId: event.eventId };
   }
 
-  private async applyTradeConfirmed(event: TradeConfirmedEvent): Promise<IngestionResult> {
+  private async applyTradeConfirmed(event: TradeConfirmedEvent, ctx: ApplyContext): Promise<IngestionResult> {
     if (!hasConfirmation(event)) {
       return {
         status: "IGNORED",
@@ -280,7 +307,7 @@ export class EventIngestionService {
 
     const buyOrderId = toOrderId(event.buyOrderOutPoint.txHash, event.buyOrderOutPoint.index);
     const sellOrderId = toOrderId(event.sellOrderOutPoint.txHash, event.sellOrderOutPoint.index);
-    const orders = await OrderModel.find({ _id: { $in: [buyOrderId, sellOrderId] } });
+    const orders = await OrderModel.find({ _id: { $in: [buyOrderId, sellOrderId] } }).session(ctx.session);
 
     if (orders.length !== 2) {
       return {
@@ -298,14 +325,14 @@ export class EventIngestionService {
       };
     }
 
-    await Promise.all(orders.map(async (order) => {
+    for (const order of orders) {
       order.status = "FILLED";
       order.confirmedAtBlock = event.trade.confirmedAtBlock;
       order.pendingTxHash = event.trade.settlementTxHash;
       order.settlementTxHash = event.trade.settlementTxHash;
       order.lastEventId = event.eventId;
-      await order.save();
-    }));
+      await order.save({ session: ctx.session });
+    }
 
     const tradeId = event.trade.settlementTxHash;
 
@@ -339,21 +366,22 @@ export class EventIngestionService {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true,
+        session: ctx.session,
       },
     );
 
-    await Promise.all([
+    ctx.afterCommit.push(() => Promise.all([
       this.realtime.emitOrderbook(event.trade.xudtTypeHash),
       this.realtime.emitTrades(event.trade.xudtTypeHash),
       ...orders.map((order) => this.realtime.emitMakerOrders(order.ownerLockHash)),
-    ]);
+    ]));
 
     return { status: "APPLIED", eventId: event.eventId };
   }
 
-  private async applyChainReorg(event: ChainReorgEvent): Promise<IngestionResult> {
+  private async applyChainReorg(event: ChainReorgEvent, ctx: ApplyContext): Promise<IngestionResult> {
     const revertedBlock = BigInt(event.revertedBlockNumber);
 
     const candidates = await OrderModel.find({
@@ -361,7 +389,7 @@ export class EventIngestionService {
         { createdAtBlock: { $exists: true } },
         { confirmedAtBlock: { $exists: true } },
       ],
-    });
+    }).session(ctx.session);
 
     for (const order of candidates) {
       const createdAtBlock = order.createdAtBlock != undefined ? BigInt(order.createdAtBlock) : undefined;
@@ -372,7 +400,7 @@ export class EventIngestionService {
         (confirmedAtBlock != undefined && confirmedAtBlock >= revertedBlock)
       ) {
         if (order.status !== "ORPHANED") {
-          await updateOrderStatus(order, "ORPHANED", event.eventId);
+          await updateOrderStatus(order, "ORPHANED", event.eventId, ctx.session);
         }
       }
     }
