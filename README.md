@@ -209,6 +209,11 @@ asset args. Token issuance requires that asset's issuer key; creating an order
 only requires the maker's key and funds. Legacy DEX/issuer environment settings
 are checked for conflicts rather than allowed to override the manifest.
 
+The backend requires `INTERNAL_BOT_TOKEN` (at least 32 characters, not a
+placeholder) and refuses to start without it. Event ingestion uses MongoDB
+transactions, so MongoDB must run as a replica set (`compose.yml` configures a
+single-node one).
+
 The backend needs MongoDB reachable at startup; its "demo mode" fallback does
 not work reliably yet.
 

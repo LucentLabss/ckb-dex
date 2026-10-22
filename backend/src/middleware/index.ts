@@ -1,6 +1,6 @@
 // Provides request context, internal bot authentication, and centralized API error middleware.
 import { NextFunction, Request, Response } from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import AppError from "../services/error.js";
 import { sendError } from "../utils/index.js";
 import { Config } from "../types/index.js";
@@ -32,6 +32,13 @@ export function errorHandler(
 	return sendError(res, "Internal server error", { requestId }, 500);
 }
 
+/** Constant-time comparison; hashing first equalizes lengths so none leaks. */
+function tokensMatch(provided: string | undefined, expected: string): boolean {
+	if (provided === undefined) return false;
+	const digest = (value: string) => createHash("sha256").update(value).digest();
+	return timingSafeEqual(digest(provided), digest(expected));
+}
+
 export function createInternalBotAuthMiddleware(config: Config) {
 	return function internalBotAuthMiddleware(
 		req: Request,
@@ -42,8 +49,15 @@ export function createInternalBotAuthMiddleware(config: Config) {
 		const internalTokenHeader = req.header("x-internal-bot-token");
 		const expectedToken = config.internalBotToken;
 
-		const isBearerValid = authHeader === `Bearer ${expectedToken}`;
-		const isInternalHeaderValid = internalTokenHeader === expectedToken;
+		if (!expectedToken) {
+			return sendError(res, "Unauthorized internal access", {
+				requestId: res.locals.requestId,
+			}, 401);
+		}
+
+		const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+		const isBearerValid = tokensMatch(bearer, expectedToken);
+		const isInternalHeaderValid = tokensMatch(internalTokenHeader, expectedToken);
 
 		if (!isBearerValid && !isInternalHeaderValid) {
 			return sendError(res, "Unauthorized internal access", {
