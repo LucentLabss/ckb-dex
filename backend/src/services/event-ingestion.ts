@@ -248,6 +248,9 @@ export class EventIngestionService {
       blockNumber: event.order.blockNumber,
       txIndex: event.order.txIndex,
       status: "LIVE",
+      priceValue: mongoose.Types.Decimal128.fromString(event.order.pricePerToken),
+      blockNum: Number(event.order.blockNumber),
+      txIdx: Number(event.order.txIndex),
       createdAtBlock: event.order.blockNumber,
       createdBlockHash: event.blockHash,
       confirmedAtBlock: event.blockNumber,
@@ -404,6 +407,7 @@ export class EventIngestionService {
         $set: {
           blockNumber: event.blockNumber ?? event.trade.confirmedAtBlock,
           blockHash: event.blockHash ?? "",
+          blockNum: Number(event.blockNumber ?? event.trade.confirmedAtBlock),
           confirmedAtBlock: event.trade.confirmedAtBlock,
           status: "CONFIRMED",
           lastEventId: event.eventId,

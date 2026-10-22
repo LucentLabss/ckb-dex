@@ -7,7 +7,7 @@ import { Config } from "./types/index.js";
 import { sendSuccess } from "./utils/index.js";
 import marketRouter from "./routes/market.js";
 import internalRouter from "./routes/internal.js";
-import { createInternalBotAuthMiddleware, errorHandler, requestContextMiddleware } from "./middleware/index.js";
+import { createInternalBotAuthMiddleware, createRateLimiter, errorHandler, requestContextMiddleware } from "./middleware/index.js";
 import { RealtimeBroadcaster } from "./services/realtime.js";
 
 interface CreateExpressServerOptions {
@@ -20,7 +20,7 @@ export function createExpressServer(config: Config, options: CreateExpressServer
     const apiVersion = `/api/v${config?.apiVersion}`;
     /** Middlewares */
     app.use(requestContextMiddleware);
-    app.use(bodyParser.json());
+    app.use(bodyParser.json({ limit: "128kb" }));
     app.use(helmet());
     app.use(cors());
 
@@ -55,12 +55,13 @@ export function createExpressServer(config: Config, options: CreateExpressServer
         });
     });
 
-    app.use(`${apiVersion}`, marketRouter);
     app.use(
         `${apiVersion}/internal`,
         createInternalBotAuthMiddleware(config),
         internalRouter,
     );
+    // Public reads are rate limited per client; the authenticated internal route is not.
+    app.use(`${apiVersion}`, createRateLimiter({ windowMs: 60_000, max: 300 }), marketRouter);
     app.use(errorHandler);
 
     const realtime = RealtimeBroadcaster.getInstance();
