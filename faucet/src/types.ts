@@ -13,6 +13,10 @@ export interface Config {
   dripAmount: bigint;
   /** Minimum time a single recipient lock must wait between successful claims. */
   cooldownHours: number;
+  /** Most claims the faucet serves per UTC day across all recipients. */
+  dailyMaxClaims: number;
+  /** Most raw token units the faucet issues per UTC day across all recipients. */
+  dailyMaxTokens: bigint;
 }
 
 export interface AppApiResponse<T> {

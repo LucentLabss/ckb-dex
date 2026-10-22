@@ -8,13 +8,25 @@ import { sendError, sendSuccess } from "../utils/shared.js";
 // fees by hammering the endpoint with many different addresses. Resets on restart; the
 // persisted per-address cooldown is the real guarantee, this is just abuse mitigation.
 const MIN_MS_BETWEEN_REQUESTS_PER_IP = 5_000;
+const MAX_TRACKED_IPS = 10_000;
 const lastRequestAtByIp = new Map<string, number>();
+
+function pruneThrottle(now: number): void {
+  if (lastRequestAtByIp.size < MAX_TRACKED_IPS) return;
+  for (const [ip, at] of lastRequestAtByIp) {
+    if (now - at >= MIN_MS_BETWEEN_REQUESTS_PER_IP) lastRequestAtByIp.delete(ip);
+  }
+}
 
 function throttleByIp(req: Request, res: Response, next: () => void) {
   const ip = req.ip ?? "unknown";
   const last = lastRequestAtByIp.get(ip);
   const now = Date.now();
+  pruneThrottle(now);
   if (last !== undefined && now - last < MIN_MS_BETWEEN_REQUESTS_PER_IP) {
+    return sendError(res, "Too many requests, please slow down", null, 429);
+  }
+  if (lastRequestAtByIp.size >= MAX_TRACKED_IPS) {
     return sendError(res, "Too many requests, please slow down", null, 429);
   }
   lastRequestAtByIp.set(ip, now);
@@ -24,8 +36,13 @@ function throttleByIp(req: Request, res: Response, next: () => void) {
 export default function createRouter(faucet: TokenFaucet) {
   const router = express.Router();
 
-  router.get("/health", (_req: Request, res: Response) => {
-    sendSuccess(res, "Faucet is healthy", { drip: faucet.config.dripAmount.toString() });
+  router.get("/health", async (_req: Request, res: Response) => {
+    const used = await faucet.claims.usage();
+    sendSuccess(res, "Faucet is healthy", {
+      drip: faucet.config.dripAmount.toString(),
+      claimsToday: used.claims,
+      dailyMaxClaims: faucet.config.dailyMaxClaims,
+    });
   });
 
   router.post("/claim", throttleByIp, async (req: Request, res: Response) => {

@@ -34,7 +34,7 @@
     "build": "tsc",
     "start": "NODE_OPTIONS='--dns-result-order=ipv4first --no-network-family-autoselection' node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "test:schemas": "tsx --test src/schemas/bot-events.test.ts"
   }
 }

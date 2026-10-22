@@ -149,15 +149,26 @@ Base path `/api/v1`.
 | --- | --- | --- |
 | GET | `/`, `/health`, `/readiness` | Service info and health |
 | GET | `/markets` | Available markets |
-| GET | `/order-book` | Aggregated bids and asks |
+| GET | `/order-book` | Bids and asks, best price first |
 | GET | `/orders`, `/orders/:txHash/:index` | List or fetch orders |
 | GET | `/trades` | Trade history |
+
+List endpoints take `limit` (1-200, default 25) and an opaque `cursor`; pass the
+response's `nextCursor` to fetch the next page. Invalid input returns `400`, and
+public reads are limited to 300 requests per minute per client.
 | POST | `/internal/events` | Bot event ingestion (bearer-token protected) |
 
 WebSocket (same port): clients send `{ "channels": [...] }` and receive a
-`snapshot`, then `update` messages per channel.
+`snapshot`, then `update` messages per channel. Channels must be
+`market:<0xhash>:orderbook`, `market:<0xhash>:trades` or `maker:<0xhash>:orders`.
+Snapshots hold at most 100 rows per side; use the REST API to page further.
+Messages are limited to 4 KiB, 8 channels per message, 16 per connection and 20
+connections per address.
 
-The faucet exposes `GET /api/v1/health` and `POST /api/v1/claim` on port 3100.
+The faucet exposes `GET /api/v1/faucet/health` and `POST /api/v1/faucet/claim`
+on port 3100. It only runs on testnet. Each claim reserves its per-address
+cooldown and a share of the global daily budget atomically before anything is
+sent, and rolls both back if the send fails.
 
 ## Deployed contracts (testnet)
 
@@ -200,14 +211,18 @@ Key environment variables:
 
 | Service | Variables |
 | --- | --- |
-| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK` |
-| faucet | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `FAUCET_ISSUER_PRIVATE_KEY`, `FAUCET_DRIP_AMOUNT`, `FAUCET_COOLDOWN_HOURS` |
+| backend | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `INTERNAL_BOT_TOKEN` (required), `CONFIRMATION_DEPTH` (default 10) |
+| faucet | `MONGO_DB_URL`, `PORT`, `CKB_RPC_URL`, `CKB_NETWORK`, `FAUCET_ISSUER_PRIVATE_KEY`, `FAUCET_DRIP_AMOUNT`, `FAUCET_COOLDOWN_HOURS`, `FAUCET_DAILY_MAX_CLAIMS`, `FAUCET_DAILY_MAX_TOKENS` |
 | ui | `VITE_API_URL`, `VITE_WS_URL`, `VITE_CKB_RPC_URL`, `VITE_DEX_NETWORK`, `VITE_FAUCET_URL` |
 
 The demo token's full identity is derived from the manifest's xUDT script and
 asset args. Token issuance requires that asset's issuer key; creating an order
 only requires the maker's key and funds. Legacy DEX/issuer environment settings
 are checked for conflicts rather than allowed to override the manifest.
+
+The backend indexes a block only after `CONFIRMATION_DEPTH` confirmations,
+re-verifies every event against CKB before applying it, and records block
+hashes so it can roll back and recover after a reorg.
 
 The backend requires `INTERNAL_BOT_TOKEN` (at least 32 characters, not a
 placeholder) and refuses to start without it. Event ingestion uses MongoDB
