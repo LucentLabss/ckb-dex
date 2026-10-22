@@ -14,6 +14,13 @@ type GateState =
 
 /** The check is a few sequential RPC calls; without a cap a stalled request would hang the page. */
 const VERIFY_TIMEOUT_MS = 20_000;
+/** Mirrors what the check really does: reach the node, then confirm the DEX contracts are live. */
+const LOADING_MESSAGES = [
+  "Connecting to the CKB network…",
+  "Verifying the DEX contracts…",
+  "Almost there…",
+];
+const MESSAGE_INTERVAL_MS = 2_500;
 /** Reassure the user that a slow public RPC is not a frozen page. */
 const SLOW_HINT_MS = 6_000;
 
@@ -44,10 +51,15 @@ export default function StartupGate({ verify, children }: StartupGateProps) {
   const [state, setState] = useState<GateState>({ status: "checking" });
   const [attempt, setAttempt] = useState(0);
   const [slow, setSlow] = useState(false);
+  const [messageIndex, setMessageIndex] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const slowTimer = window.setTimeout(() => setSlow(true), SLOW_HINT_MS);
+    const messageTimer = window.setInterval(
+      () => setMessageIndex((index) => Math.min(index + 1, LOADING_MESSAGES.length - 1)),
+      MESSAGE_INTERVAL_MS,
+    );
 
     withTimeout(verify(), VERIFY_TIMEOUT_MS).then(
       () => {
@@ -65,12 +77,14 @@ export default function StartupGate({ verify, children }: StartupGateProps) {
     return () => {
       cancelled = true;
       window.clearTimeout(slowTimer);
+      window.clearInterval(messageTimer);
     };
   }, [verify, attempt]);
 
   const retry = useCallback(() => {
     setState({ status: "checking" });
     setSlow(false);
+    setMessageIndex(0);
     setAttempt((count) => count + 1);
   }, []);
 
@@ -108,10 +122,7 @@ export default function StartupGate({ verify, children }: StartupGateProps) {
           </div>
         ) : (
           <div role="status" className="startup-status">
-            <p className="startup-message">Checking CKB deployment…</p>
-            <div className="startup-bar" aria-hidden="true">
-              <span />
-            </div>
+            <p key={messageIndex} className="startup-message">{LOADING_MESSAGES[messageIndex]}</p>
             <p className={slow ? "startup-hint is-visible" : "startup-hint"}>
               Still working. The CKB node is responding slowly.
             </p>
