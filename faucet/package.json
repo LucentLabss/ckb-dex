@@ -9,6 +9,7 @@
     "@types/helmet": "^4.0.0",
     "@types/mongoose": "^5.11.97",
     "@types/node": "^26.2.0",
+    "mongodb-memory-server": "^11.2.0",
     "tsx": "^4.23.12",
     "typescript": "^5"
   },
@@ -25,6 +26,7 @@
     "dev": "NODE_OPTIONS='--dns-result-order=ipv4first --no-network-family-autoselection' tsx watch src/index.ts",
     "build": "tsc",
     "start": "NODE_OPTIONS='--dns-result-order=ipv4first --no-network-family-autoselection' node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"src/**/*.test.ts\""
   }
 }
