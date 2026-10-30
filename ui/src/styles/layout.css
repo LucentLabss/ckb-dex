@@ -1,0 +1,51 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(1200px 600px at 20% 0, #0a1736, var(--bg));
+  color: var(--text);
+  font: 15px/1.35 var(--font);
+}
+
+/* header */
+.hdr { display: flex; align-items: center; gap: 28px; padding: 12px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.logo { display: flex; align-items: center; gap: 8px; font-size: 24px; font-weight: 700; }
+.hdr nav { display: flex; gap: 6px; }
+.net-badge { margin-left: -16px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; color: var(--mut); background: #0a1a3a; }
+.nav { padding: 10px 20px; border-radius: 10px; font-weight: 600; color: #dbe5ff; }
+.nav.active { background: var(--acc); color: #fff; }
+.is-connected .nav.active { background: #0f9d6c; }
+.hdr-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.pill { padding: 10px 18px; border-radius: 12px; border: 1.5px solid; font-weight: 600; white-space: nowrap; }
+.get-token { border-color: #38bdf8; color: #fff; }
+.get-token:disabled { opacity: 0.6; cursor: default; }
+.get-ckb { border-color: var(--line); color: var(--mut); font-weight: 500; }
+.get-ckb:hover { color: var(--text); }
+.wallet { border-color: var(--line); background: #0a1a3a; display: inline-flex; align-items: center; gap: 8px; }
+.wallet-icon { width: 18px; height: 18px; border-radius: 4px; flex-shrink: 0; }
+.wallet-addr { overflow: hidden; text-overflow: ellipsis; }
+.wallet-bal { color: var(--mut); font-weight: 500; padding-left: 8px; border-left: 1px solid var(--line); }
+.wallet-bal.updating { animation: bal-pulse 1.2s ease-in-out infinite; }
+@keyframes bal-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .wallet-bal.updating { animation: none; font-style: italic; } }
+
+/* trade page grid */
+.trade-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(270px, 310px);
+  grid-template-areas: "pair pair order" "book chart order" "orders orders orders";
+  gap: 16px;
+  padding: 16px 24px;
+  align-items: start;
+}
+
+/* footer */
+.foot { display: flex; align-items: center; gap: 14px; padding: 14px 24px; border-top: 1px solid var(--line); font-size: 14px; color: #c9d6f2; flex-wrap: wrap; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+.ticker { display: flex; gap: 26px; margin-left: 12px; }
+.ticker span { border-left: 1px solid var(--line); padding-left: 26px; }
+.copy { margin-left: auto; color: var(--mut); }
+
+.placeholder { flex: 1; padding: 48px 24px; }
+.placeholder p { color: var(--mut); }

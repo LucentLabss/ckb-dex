@@ -1,0 +1,65 @@
+:root {
+  --font: "DM Sans", system-ui, sans-serif;
+  --bg: #050b1f;
+  --card: #07122b;
+  --line: #13264d;
+  --text: #f2f6ff;
+  --mut: #8ea3c9;
+  --green: #12d98a;
+  --red: #ff2d55;
+  --acc: #4f46e5;
+}
+.app.is-connected {
+  --acc: #12d98a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+}
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+input {
+  background: none;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  font: inherit;
+  width: 100%;
+  min-width: 0;
+}
+input::placeholder {
+  color: #4f6491;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.up {
+  color: var(--green);
+  font-style: normal;
+}
+.down {
+  color: var(--red);
+  font-style: normal;
+}
+.magenta {
+  color: #d946ef;
+}
+.live {
+  color: var(--green);
+  font-style: normal;
+  font-weight: 500;
+  font-size: 0.85em;
+}
