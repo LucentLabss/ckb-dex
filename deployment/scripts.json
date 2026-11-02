@@ -2,13 +2,13 @@
   "devnet": {},
   "testnet": {
     "dex-order-lock": {
-      "codeHash": "0x8560b80bacb96bad676ce0c75b73ebf93e3a6fb06cda5cf3a89137f11018df3b",
+      "codeHash": "0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f",
       "hashType": "data2",
       "cellDeps": [
         {
           "cellDep": {
             "outPoint": {
-              "txHash": "0x5ed822ca06689242f3f0d3a12509c786456cdc159ccd7b0ec7a8fd62d1c37937",
+              "txHash": "0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149",
               "index": 0
             },
             "depType": "code"
@@ -23,7 +23,7 @@
         {
           "cellDep": {
             "outPoint": {
-              "txHash": "0x0544b2c59d17c3fe38b99d892d75d56ce35755ca7aa68f8e7140cdc70448a6fa",
+              "txHash": "0xcc5b9f7d22f7f6115064bfc360b0dc8d28357b80a9c5a14179ab06c889fd1d99",
               "index": 0
             },
             "depType": "code"

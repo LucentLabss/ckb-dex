@@ -6,13 +6,13 @@
       "genesisHash": "0x10639e0895502b5688a6be8cf69460d76541bfa4821629d86d62ba0aae3f9606",
       "client": "testnet",
       "dex": {
-        "codeHash": "0x8560b80bacb96bad676ce0c75b73ebf93e3a6fb06cda5cf3a89137f11018df3b",
+        "codeHash": "0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f",
         "hashType": "data2",
         "cellDeps": [
           {
             "cellDep": {
               "outPoint": {
-                "txHash": "0x5ed822ca06689242f3f0d3a12509c786456cdc159ccd7b0ec7a8fd62d1c37937",
+                "txHash": "0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149",
                 "index": 0
               },
               "depType": "code"
