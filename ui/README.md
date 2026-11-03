@@ -1,8 +1,8 @@
 # LucentDex
 
 ```
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Runs on **CKB testnet** (public RPC; JoyID and other CKB wallets) against the

@@ -182,8 +182,24 @@ Unconfigured networks are rejected; only testnet is currently listed.
 `scripts.json` and `system-scripts.json` remain deployment-tool artifacts, not
 runtime configuration. The manifest records the currently deployed contract:
 `dex-order-lock` uses code hash
-`0x8560b80bacb96bad676ce0c75b73ebf93e3a6fb06cda5cf3a89137f11018df3b`
-(`data2`).
+`0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f`
+(`data2`), deployed in transaction
+`0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149`
+(2026-11-02, includes the buyer-change and onchain refund/cancel checks).
+
+### Redeploying the contract
+
+1. Build (`make build CONTRACT=dex-order-lock` in `smart-contract/`, or the
+   reproducible Docker script) and deploy with your deployment tool. This writes
+   a new migration under `deployment/testnet/<contract>/migrations/`.
+2. Update **both** `dex.codeHash` and the `dex` cell dep `txHash` in
+   `deployment/manifest.json`. Updating only the hash leaves the backend and UI
+   pointing at the old code cell.
+3. Remove any `CKB_DEX_SCRIPT_*` overrides from `backend/.env`; startup fails if
+   they disagree with the manifest.
+4. Orders locked under the previous script are not recognised by the new code
+   hash. Clear the backend database (not the faucet's) and rebuild:
+   `git pull && docker compose up -d --build`. Redeploy the UI.
 
 ## Getting started
 
@@ -196,9 +212,9 @@ Each service has a `.env.example`; copy it to `.env` and fill in values.
 docker compose up --build
 
 # Or run locally, per service (backend, faucet, ui)
-cd backend && npm install && npm run dev      # API on :3000
-cd faucet  && npm install && npm run dev      # faucet on :3100
-cd ui      && npm install && npm run dev      # Vite dev server
+cd backend && bun install && bun run dev      # API on :3000
+cd faucet  && bun install && bun run dev      # faucet on :3100
+cd ui      && bun install && bun run dev      # Vite dev server
 
 # Off-chain helper scripts
 cd offchain && npm install
