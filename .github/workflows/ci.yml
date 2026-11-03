@@ -21,11 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - run: npm ci
-      # tsc -b && vite build: catches type errors, duplicate declarations and bad merges.
-      - run: npm run build
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # Catches bad merges, duplicate declarations and unresolved imports.
+      - run: bun run build
 
   services:
     name: ${{ matrix.service }} build and test

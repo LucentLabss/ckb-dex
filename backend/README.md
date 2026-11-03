@@ -31,13 +31,13 @@ Copy `.env.example` to `.env`.
 | `API_VERSION` | `1` | Sets the base path, `/api/v<N>`. |
 | `NODE_ENV` | `development` | `production` or `development`. |
 
-The DEX order lock script comes from the deployment manifest. The legacy `CKB_DEX_SCRIPT_*` variables may still be set, but startup fails if they disagree with the manifest.
+The DEX order lock script comes from the deployment manifest. Prefer not setting the legacy `CKB_DEX_SCRIPT_*` variables at all: startup fails with `Configured DEX script conflicts with the selected deployment manifest` if they disagree, for example after the contract is redeployed. For quick local testing you can lower `CONFIRMATION_DEPTH` (for example `2`) so orders turn Open in about 30 seconds instead of about 90; keep `10` in production.
 
 ## Run locally
 
 ```bash
 cd backend
-npm install            # or: bun install
+bun install            # the committed lockfile is bun.lock
 cp .env.example .env   # set INTERNAL_BOT_TOKEN
 npm run dev            # watch mode on :3000
 ```
