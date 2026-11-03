@@ -1,0 +1,12 @@
+{
+  "cell_recipes": [
+    {
+      "name": "lock-script-contract",
+      "tx_hash": "0xcc5b9f7d22f7f6115064bfc360b0dc8d28357b80a9c5a14179ab06c889fd1d99",
+      "index": 0,
+      "occupied_capacity": 4052800000000,
+      "data_hash": "0xddfe2922d2391237fb06a5cf2fc51c780ed513c03c07699d7af2e25e0b37ddd8"
+    }
+  ],
+  "dep_group_recipes": []
+}
