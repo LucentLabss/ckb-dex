@@ -29,5 +29,5 @@ src/
 - utils/        format, chart math, order drafts and backend row mapping, error messages
 - styles/       variables, layout, components CSS
 
-Orders: Long = buy the token with CKB, Short = sell held token for CKB. The
+Orders: Buy = buy the token with CKB, Sell = sell held token for CKB. The
 contract matches all-or-nothing on identical amount and total price.

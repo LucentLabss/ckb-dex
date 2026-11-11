@@ -7,7 +7,7 @@ function Row({ order, onCancel }) {
   return (
     <div className="thead trow">
       <span>{order.pair}</span>
-      <span className={order.side === "Long" ? "up" : "down"}>
+      <span className={order.side === "Buy" ? "up" : "down"}>
         {order.side}
       </span>
       <span>{order.type}</span>

@@ -19,25 +19,26 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
 
   const symbol = token?.symbol ?? "TOKEN";
   const available =
-    side === "long"
+    side === "buy"
       ? balance !== null && fmtCkb(balance)
-      : tokenBalance !== null && `${fmtUnits(tokenBalance, token.decimals)} ${symbol}`;
+      : tokenBalance !== null &&
+        `${fmtUnits(tokenBalance, token.decimals)} ${symbol}`;
 
   return (
     <aside className="card order">
       {connected && (
         <div className="toggle">
           <button
-            className={side === "long" ? "on" : ""}
-            onClick={() => setSide("long")}
+            className={side === "buy" ? "on" : ""}
+            onClick={() => setSide("buy")}
           >
-            Long
+            Buy
           </button>
           <button
-            className={side === "short" ? "on short" : ""}
-            onClick={() => setSide("short")}
+            className={side === "sell" ? "on sell" : ""}
+            onClick={() => setSide("sell")}
           >
-            Short
+            Sell
           </button>
         </div>
       )}
@@ -52,7 +53,8 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
             <Field
               label="Order Price"
               hint={
-                marketPrice !== null && marketPrice !== undefined && (
+                marketPrice !== null &&
+                marketPrice !== undefined && (
                   <button type="button" onClick={() => setPrice(marketPrice)}>
                     Market {fmtPriceAuto(marketPrice)}
                   </button>
@@ -80,10 +82,10 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
           </div>
           <button
             type="submit"
-            className={`cta go ${side === "short" ? "sell" : ""}`}
+            className={`cta go ${side === "sell" ? "sell" : ""}`}
             disabled={!token}
           >
-            ▦ Review {side === "long" ? "Long" : "Short"} order
+            ▦ Review {side === "buy" ? "Buy" : "Sell"} order
           </button>
         </form>
       ) : (

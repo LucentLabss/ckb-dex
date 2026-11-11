@@ -23,7 +23,7 @@ export function useOrderForm({ onReview, onDraftReady }) {
   const { token, lock, balance, tokenBalance } = useWallet();
   const { marketPrice } = useMarket();
   const { notify } = useToast();
-  const [side, setSide] = useState("long");
+  const [side, setSide] = useState("buy");
   const [type, setType] = useState("limit");
   const [values, setValues] = useState({ orderPrice: "", amount: "" });
   const [invalid, setInvalid] = useState(null); // field name to highlight
@@ -54,7 +54,7 @@ export function useOrderForm({ onReview, onDraftReady }) {
     const draft = buildOrderDraft({ side, ...values }, token);
     if (draft.error) return null;
     const lockedCkb =
-      side === "long" ? buyOrderCapacity(lock, token, draft.tokenAmount, draft.totalPrice) : null;
+      side === "buy" ? buyOrderCapacity(lock, token, draft.tokenAmount, draft.totalPrice) : null;
     if (checkFunds(draft, { balance, tokenBalance, token, requiredCkb: lockedCkb })) return null;
     return { ...draft, lockedCkb };
   };
@@ -87,7 +87,7 @@ export function useOrderForm({ onReview, onDraftReady }) {
     if (draft.error) return reject(draft.field, "Check your order", draft.error);
 
     const lockedCkb =
-      side === "long" ? buyOrderCapacity(lock, token, draft.tokenAmount, draft.totalPrice) : null;
+      side === "buy" ? buyOrderCapacity(lock, token, draft.tokenAmount, draft.totalPrice) : null;
     const problem = checkFunds(draft, { balance, tokenBalance, token, requiredCkb: lockedCkb });
     if (problem) return reject(problem.field, problem.title, problem.message);
 
