@@ -38,52 +38,96 @@ html, body { overflow-x: hidden; }
 
 /* ---------- phone ---------- */
 @media (max-width: 700px) {
-  .hdr { padding: 10px 12px; }
-  .logo { font-size: 20px; }
-  .logo svg { width: 30px; height: 30px; }
-  .nav { padding: 9px 16px; }
-  .hdr-right { gap: 8px; }
-  .pill { padding: 8px 12px; font-size: 14px; }
-  .wallet { max-width: 46vw; }
-  .wallet-bal { display: none; }
+  .app { font-size: 13.5px; }
 
+  /* header: row 1 = logo + wallet, row 2 = balances + faucet buttons */
+  .hdr { gap: 8px 10px; padding: 8px 12px; }
+  .logo { font-size: 17px; gap: 6px; }
+  .logo img { width: 22px; height: 22px; }
+  .net-badge { margin-left: -4px; padding: 1px 6px; font-size: 9.5px; }
+  .hdr nav { display: none; } /* one destination, and you're on it */
+  .hdr-right { display: contents; }
+  .pill { font-size: 13px; }
+  .pill.wallet { order: 1; margin-left: auto; padding: 6px 10px; min-height: 34px; max-width: 52vw; border-radius: 10px; }
+  .wallet-bal { display: none; }
+  .hdr-strip {
+    order: 2; width: 100%; gap: 6px;
+    padding-top: 8px; border-top: 1px solid var(--line);
+  }
+  .hdr-bals {
+    display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0;
+    font-size: 12px; line-height: 1.3; font-weight: 600;
+  }
+  .strip-bal { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip-bal + .strip-bal { color: var(--mut); font-weight: 500; }
+  .hdr-strip .pill { flex-shrink: 0; padding: 6px 10px; min-height: 32px; font-size: 12.5px; border-radius: 10px; }
+
+  /* trade grid */
   .trade-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: "pair" "chart" "order" "book" "orders";
-    padding: 12px; gap: 12px;
+    padding: 10px; gap: 10px;
   }
 
-  .pairbar { position: relative; gap: 12px 16px; padding: 14px; }
-  .coin { width: 40px; height: 40px; font-size: 22px; }
+  .pairbar { position: relative; gap: 10px 14px; padding: 12px; }
+  .coin { width: 34px; height: 34px; font-size: 18px; }
   .pair { flex: 1 1 0; min-width: 0; padding-right: 36px; }
+  .pair b { font-size: 16px; }
   .stat { flex: 1 1 0; min-width: 0; }
   .stat-price { flex-basis: 100%; }
-  .stat b { font-size: 16px; }
+  .stat b { font-size: 14px; }
+  .big { font-size: 18px; }
   .pairbar .seg { flex: 1 1 100%; margin-left: 0; }
-  .gear { position: absolute; top: 10px; right: 10px; }
+  .gear { position: absolute; top: 8px; right: 8px; font-size: 17px; }
+
+  .seg button { padding: 6px 10px; }
+  .tabs { padding: 6px 8px; }
+  .tabs > button { padding: 6px 10px; }
+  .card-h { padding: 12px; font-size: 15px; }
+  .ob-head, .ob-row { padding-left: 12px; padding-right: 12px; font-size: 12.5px; }
+  .ob-row { padding-top: 6px; padding-bottom: 6px; }
+  .mid { padding: 10px 12px; }
+  .mid b { font-size: 19px; }
 
   .chart-wrap { --axis-w: 50px; --pad-l: 8px; }
   .y-axis, .x-axis { font-size: 11px; }
-  .ohlc { font-size: 12.5px; }
+  .ohlc { font-size: 12px; }
 
-  .app input { font-size: 16px; }
-  .cta { padding: 16px; }
-  .foot { padding: 12px; gap: 8px 12px; }
-  .ticker { order: 3; width: 100%; margin-left: 0; gap: 0; }
-  .ticker span { padding: 0 16px; white-space: nowrap; }
-  .ticker span:first-child { border-left: 0; padding-left: 0; }
-  .copy { margin-left: 0; width: 100%; }
+  .order { padding: 12px; gap: 12px; }
+  .order-form { gap: 12px; }
+  .input { padding: 10px 12px; }
+  .toggle button { padding: 9px; }
+  .field-hint, .field-hint button, .sel { font-size: 12px; }
+  .app input { font-size: 16px; } /* below 16px iOS zooms on focus */
+  .cta { padding: 13px; font-size: 15px; }
+  .thead { padding: 10px 12px; }
+  .empty-ico { font-size: 22px; }
+
+  .toasts { top: 8px; right: 8px; width: calc(100vw - 16px); }
+  .toast { padding: 10px 10px 12px; gap: 10px; }
+  .toast-body b { font-size: 14px; }
+  .toast-body p { font-size: 12.5px; }
+  .sheet-h h2 { font-size: 18px; }
+
+  /* footer: always one line */
+  .foot {
+    flex-wrap: nowrap; white-space: nowrap; gap: 8px;
+    padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+    font-size: 12px;
+  }
+  .dot { width: 8px; height: 8px; }
+  .foot-status { flex-shrink: 0; }
+  .copy { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 
 /* ---------- small phone ---------- */
-@media (max-width: 520px) {
-  .get-token { display: none; }
-}
 @media (max-width: 400px) {
   .order-form .row2 { grid-template-columns: minmax(0, 1fr); }
   .ob-head, .ob-row { padding-left: 10px; padding-right: 10px; font-size: 12px; }
   .card-h { padding: 12px 10px; }
-  .mid { padding: 12px 10px; }
-  .mid b { font-size: 20px; }
-  .pill { padding: 8px 10px; font-size: 13px; }
+  .mid { padding: 10px; }
+  .mid b { font-size: 18px; }
+  .hdr-strip .pill { padding: 6px 8px; font-size: 12px; }
+  .foot { font-size: 11.5px; }
+  .foot-label { display: none; }
 }

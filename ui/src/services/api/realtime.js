@@ -6,11 +6,20 @@ import { WS_URL } from "../../config/env.js";
  * `maker:<lockHash>:orders`. Each subscription first receives a snapshot, then
  * a full snapshot again on every update. Reconnects with backoff and
  * resubscribes; the backend has no unsubscribe, so leaving is client-side only.
+ *
+ * Mobile browsers freeze background tabs and often drop the socket without
+ * firing `close` (screen lock, app switch, Wi-Fi <-> cellular). So when the
+ * page returns to the foreground or the network comes back, we open a fresh
+ * connection, which re-sends every channel's snapshot and catches up on
+ * anything missed (e.g. an order that settled while the phone was locked).
  */
 const listeners = new Map(); // channel -> Set<fn>
 let socket = null;
 let retry = 0;
 let reconnectTimer = null;
+let hiddenAt = null;
+/** Reconnect on return if the page was in the background at least this long. */
+const STALE_AFTER_HIDDEN_MS = 3_000;
 
 function send(channels) {
   if (socket?.readyState === WebSocket.OPEN && channels.length) {
@@ -45,6 +54,35 @@ function connect() {
     );
     reconnectTimer = setTimeout(connect, delay);
   };
+}
+
+/** Drops the current socket (if any) and connects again straight away. */
+function reconnectNow() {
+  if (!listeners.size) return;
+  clearTimeout(reconnectTimer);
+  retry = 0;
+  if (socket) {
+    socket.onclose = null;
+    socket.onmessage = null;
+    socket.close();
+    socket = null;
+  }
+  connect();
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      hiddenAt = Date.now();
+      return;
+    }
+    const away = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+    hiddenAt = null;
+    if (away >= STALE_AFTER_HIDDEN_MS || socket?.readyState !== WebSocket.OPEN) reconnectNow();
+  });
+  // Restored from the back/forward cache: the old socket is gone.
+  window.addEventListener("pageshow", (e) => e.persisted && reconnectNow());
+  window.addEventListener("online", reconnectNow);
 }
 
 export function subscribe(channel, onData) {
