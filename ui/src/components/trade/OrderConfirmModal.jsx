@@ -62,7 +62,7 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
     }
   };
 
-  const isLong = draft.side === "long";
+  const isBuy = draft.side === "buy";
   const tokenAmt = `${fmtUnits(draft.tokenAmount, token.decimals, token.decimals)} ${token.symbol}`;
   const exact = Boolean(prepared);
   const estimating = !exact && stage === "preparing";
@@ -70,12 +70,12 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
   const ckbOut = exact ? -prepared.delta.ckb : null;
   // A sell order's cell holds a CKB deposit that's paid back, with the price, when it fills.
   // It depends only on the order, so it's known before the tx is built.
-  const deposit = isLong
+  const deposit = isBuy
     ? null
     : exact
       ? prepared.tx.outputs[0].capacity
       : sellOrderDeposit(lock, token, draft.tokenAmount, draft.totalPrice);
-  const tokenCell = isLong ? draft.lockedCkb - draft.totalPrice - SETTLEMENT_FEE_RESERVE : null;
+  const tokenCell = isBuy ? draft.lockedCkb - draft.totalPrice - SETTLEMENT_FEE_RESERVE : null;
   const pendingText = estimating ? <Calculating /> : "—";
   const approx = (value) => (estimating ? `≈ ${value}` : value);
 
@@ -85,7 +85,7 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
     ["Price", `${fmtUnits(draft.pricePerToken, 8, 8)} CKB / ${token.symbol}`],
     ["Amount", tokenAmt],
     ["Order total", fmtCkb(draft.totalPrice, 8)],
-    isLong
+    isBuy
       ? [
           "Leaves your wallet",
           ckbOut !== null ? fmtCkb(ckbOut, 8) : approx(fmtCkb(draft.lockedCkb + ESTIMATED_ORDER_FEE, 8)),
@@ -102,7 +102,7 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
           ),
           `The CKB is the order cell's deposit (${deposit !== null ? fmtCkb(deposit, 0) : "…"}) plus fees`,
         ],
-    isLong
+    isBuy
       ? ["You receive when filled", tokenAmt, `In a token cell holding ${fmtCkb(tokenCell, 0)}, counted with the token, not your CKB balance`]
       : [
           "You receive when filled",
@@ -117,7 +117,7 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
   return createPortal(
     <div className="sheet-backdrop" role="presentation">
       <section
-        className={`sheet ${isLong ? "long" : "short"}`}
+        className={`sheet ${isBuy ? "buy" : "sell"}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
@@ -125,8 +125,8 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
         <header className="sheet-h">
           <div>
             <h2 id="confirm-title">Confirm order</h2>
-            <span className={`side-badge ${isLong ? "up" : "down"}`}>
-              {isLong ? "Long · Buy" : "Short · Sell"} {token.symbol}
+            <span className={`side-badge ${isBuy ? "up" : "down"}`}>
+              {isBuy ? "Buy" : "Sell"} {token.symbol}
             </span>
           </div>
           <button className="sheet-x" onClick={onClose} disabled={busy} aria-label="Close">
@@ -174,7 +174,7 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
             Cancel
           </button>
           <button
-            className={`cta go ${isLong ? "" : "sell"}`}
+            className={`cta go ${isBuy ? "" : "sell"}`}
             onClick={fulfil}
             disabled={!prepared || busy}
           >

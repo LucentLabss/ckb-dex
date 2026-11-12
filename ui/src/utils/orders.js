@@ -15,7 +15,7 @@ function parseUnits(text, decimals) {
 
 /**
  * Turns form input into an on-chain order draft, or `{ error }`.
- * "Long" buys the token with CKB (BID); "Short" sells held token for CKB (ASK).
+ * "buy" buys the token with CKB (BID); "sell" sells held token for CKB (ASK).
  * Order price is CKB per whole token; the contract stores the order total.
  */
 export function buildOrderDraft({ side, orderPrice, amount }, token) {
@@ -29,7 +29,7 @@ export function buildOrderDraft({ side, orderPrice, amount }, token) {
   }
   if (pricePerToken <= 0n) return fail("orderPrice", "Order price must be greater than 0 CKB.");
 
-  if (!String(amount ?? "").trim()) return fail("amount", `Enter how many ${token.symbol} you want to ${side === "long" ? "buy" : "sell"}.`);
+  if (!String(amount ?? "").trim()) return fail("amount", `Enter how many ${token.symbol} you want to ${side === "buy" ? "buy" : "sell"}.`);
   const tokenAmount = parseUnits(amount, token.decimals);
   if (tokenAmount === null) {
     return fail(
@@ -47,7 +47,7 @@ export function buildOrderDraft({ side, orderPrice, amount }, token) {
 
   return {
     side,
-    contractSide: side === "long" ? SIDE_BUY : SIDE_SELL,
+    contractSide: side === "buy" ? SIDE_BUY : SIDE_SELL,
     pricePerToken,
     tokenAmount,
     totalPrice,
@@ -56,7 +56,7 @@ export function buildOrderDraft({ side, orderPrice, amount }, token) {
 
 /** Checks a draft against the wallet's balances. Returns { field, title, message } or null. */
 export function checkFunds(draft, { balance, tokenBalance, token, requiredCkb }) {
-  if (draft.side === "short") {
+  if (draft.side === "sell") {
     if (tokenBalance !== null && draft.tokenAmount > tokenBalance) {
       return {
         field: "amount",
@@ -101,7 +101,7 @@ export function toOrderRow(doc, token) {
   return {
     id: doc._id ?? `${doc.outPoint.txHash}:${doc.outPoint.index}`,
     pair: `${token?.symbol ?? "xUDT"}/CKB`,
-    side: doc.direction === "BID" ? "Long" : "Short",
+    side: doc.direction === "BID" ? "Buy" : "Sell",
     type: "Limit",
     price: amount ? total / amount : 0,
     amount,
@@ -123,7 +123,7 @@ export function pendingOrderRow(draft, txHash, token) {
     txHash,
     xudtTypeHash: token.typeHash,
     pair: `${token.symbol}/CKB`,
-    side: draft.side === "long" ? "Long" : "Short",
+    side: draft.side === "buy" ? "Buy" : "Sell",
     type: "Limit",
     price: total / amount,
     amount,

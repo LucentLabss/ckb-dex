@@ -243,8 +243,8 @@ export function MarketProvider({ children }) {
       .filter(({ doc }) => !closedStatus(doc.outPoint))
       .map(({ doc, phase }) => ({ ...toOrderRow(doc, token), settling: phase === "settling" }));
     const rows = [...live.map((d) => toOrderRow(d, token)), ...heldRows, ...ownPending];
-    const asks = rows.filter((r) => r.side === "Short").sort((a, b) => a.price - b.price);
-    const bids = rows.filter((r) => r.side === "Long").sort((a, b) => b.price - a.price);
+    const asks = rows.filter((r) => r.side === "Sell").sort((a, b) => a.price - b.price);
+    const bids = rows.filter((r) => r.side === "Buy").sort((a, b) => b.price - a.price);
     const tradable = (r) => !r.pending && !r.settling;
     const bestAsk = asks.find(tradable)?.price ?? null;
     const bestBid = bids.find(tradable)?.price ?? null;

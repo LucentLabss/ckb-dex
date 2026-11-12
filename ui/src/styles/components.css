@@ -388,7 +388,7 @@
   background: #12504b;
   color: #fff;
 }
-.toggle button.on.short {
+.toggle button.on.sell {
   background: #5a1830;
 }
 .toggle.type button.on.accent {
@@ -552,7 +552,7 @@ body.modal-open {
   font-family: var(--font);
   animation: sheet-rise 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.sheet.short {
+.sheet.sell {
   border-top-color: var(--red);
 }
 .sheet-h {

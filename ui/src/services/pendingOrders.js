@@ -7,6 +7,7 @@
 const KEY = (lockHash) => `lucentdex:pending:${lockHash}`;
 const MAX_AGE_MS = 30 * 60 * 1000;
 const EMPTY = [];
+const LEGACY_SIDES = { Long: "Buy", Short: "Sell" };
 
 const cache = new Map(); // lockHash -> rows (stable reference between writes)
 const listeners = new Set();
@@ -16,7 +17,8 @@ function read(lockHash) {
     const raw = JSON.parse(localStorage.getItem(KEY(lockHash)) ?? "[]");
     const cutoff = Date.now() - MAX_AGE_MS;
     return raw
-      .map((r) => ({ ...r, time: new Date(r.time) }))
+      // Rows saved before sides were renamed say "Long"/"Short".
+      .map((r) => ({ ...r, side: LEGACY_SIDES[r.side] ?? r.side, time: new Date(r.time) }))
       .filter((r) => r.time.getTime() >= cutoff);
   } catch {
     return [];
