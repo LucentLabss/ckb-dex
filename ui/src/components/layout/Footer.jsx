@@ -15,8 +15,9 @@ export default function Footer() {
   return (
     <footer className="foot">
       <span className="dot" />
-      <span>
-        Connection: <b className={tone}>{label}</b>
+      <span className="foot-status">
+        <span className="foot-label">Connection: </span>
+        <b className={tone}>{label}</b>
       </span>
       <span className="copy">© 2026 LucentDex • {network}</span>
     </footer>

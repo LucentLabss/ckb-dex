@@ -12,6 +12,8 @@ import { logAction } from "../utils/errors.js";
 import { fmtNum } from "../utils/format.js";
 
 const PENDING_POLL_MS = 10_000;
+/** Fallback refresh while we have open orders, in case realtime silently dropped (common on mobile). */
+const OPEN_POLL_MS = 15_000;
 /** Background builds kept for the confirmation sheet (most recent last). */
 const MAX_PREBUILDS = 4;
 
@@ -82,6 +84,29 @@ export function useOrders() {
     const id = setInterval(() => load(), PENDING_POLL_MS);
     return () => clearInterval(id);
   }, [pending.length, load]);
+
+  // While any of our orders is open, re-check it now and then: a mobile browser
+  // can drop the realtime socket without notice, and the fill would go unseen.
+  const hasOpen = docs.some((d) => OPEN_STATUSES.has(d.status));
+  useEffect(() => {
+    if (!hasOpen) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, OPEN_POLL_MS);
+    return () => clearInterval(id);
+  }, [hasOpen, load]);
+
+  // Catch up as soon as the user comes back to the tab (phone unlocked, app switched back).
+  useEffect(() => {
+    if (!lockHash) return;
+    const onVisible = () => document.visibilityState === "visible" && load();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onVisible);
+    };
+  }, [lockHash, load]);
 
   // Drop pending rows once their tx shows up in the backend.
   useEffect(() => {
