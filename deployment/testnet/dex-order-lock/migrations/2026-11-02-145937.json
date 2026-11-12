@@ -1,0 +1,12 @@
+{
+  "cell_recipes": [
+    {
+      "name": "dex-order-lock",
+      "tx_hash": "0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149",
+      "index": 0,
+      "occupied_capacity": 4968800000000,
+      "data_hash": "0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f"
+    }
+  ],
+  "dep_group_recipes": []
+}
