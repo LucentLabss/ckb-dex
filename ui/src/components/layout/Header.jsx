@@ -51,11 +51,16 @@ export default function Header() {
                     : `Mint free test ${token.symbol} to your wallet`
                 }
               >
-                {faucet.loading
-                  ? "Requesting…"
-                  : faucet.cooldownLabel
-                    ? `◉ ${token.symbol} in ${faucet.cooldownLabel}`
-                    : `◉ Get ${token.symbol}`}
+                {faucet.loading ? (
+                  "Requesting…"
+                ) : faucet.cooldownLabel ? (
+                  <>
+                    ◉ <span className="hide-phone">{token.symbol} in </span>
+                    {faucet.cooldownLabel}
+                  </>
+                ) : (
+                  `◉ Get ${token.symbol}`
+                )}
               </button>
             )}
             <a
@@ -65,7 +70,7 @@ export default function Header() {
               rel="noreferrer"
               title="Testnet CKB from the Nervos faucet (needed for order deposits and fees)"
             >
-              Get CKB ↗
+              Get CKB<span className="hide-phone"> ↗</span>
             </a>
           </div>
         )}
