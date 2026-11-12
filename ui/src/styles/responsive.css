@@ -78,7 +78,8 @@ html, body { overflow-x: hidden; }
   .trade-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: "pair" "chart" "order" "book" "orders";
-    padding: 10px; gap: 10px;
+    padding: 12px max(var(--gutter), env(safe-area-inset-right)) 12px max(var(--gutter), env(safe-area-inset-left));
+    gap: 12px;
   }
 
   .pairbar { position: relative; gap: 10px 14px; padding: 12px; }
@@ -115,7 +116,7 @@ html, body { overflow-x: hidden; }
   .thead { padding: 10px 12px; }
   .empty-ico { font-size: 22px; }
 
-  .toasts { top: 8px; right: 8px; width: calc(100vw - 16px); }
+  .toasts { top: 8px; right: var(--gutter); width: calc(100vw - 2 * var(--gutter)); }
   .toast { padding: 10px 10px 12px; gap: 10px; }
   .toast-body b { font-size: 14px; }
   .toast-body p { font-size: 12.5px; }
@@ -124,7 +125,7 @@ html, body { overflow-x: hidden; }
   /* footer: always one line */
   .foot {
     flex-wrap: nowrap; white-space: nowrap; gap: 8px;
-    padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding: 8px max(var(--gutter), env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(var(--gutter), env(safe-area-inset-left));
     font-size: 12px;
   }
   .dot { width: 8px; height: 8px; }
