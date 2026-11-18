@@ -1,0 +1,10 @@
+.git
+.github
+**/node_modules
+**/dist
+smart-contract/target
+ui
+weekly-progress-logs
+*.log
+.env
+.env.*

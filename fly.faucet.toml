@@ -1,0 +1,25 @@
+# Fly.io configuration for CKB DEX Faucet Service
+app = "ckb-dex-faucet"
+primary_region = "fra"
+
+[build]
+  dockerfile = "faucet/Dockerfile"
+
+[env]
+  PORT = "3100"
+  NODE_ENV = "production"
+  CKB_NETWORK = "testnet"
+  CKB_RPC_URL = "https://testnet.ckb.dev"
+  FAUCET_DRIP_AMOUNT = "100"
+  FAUCET_DAILY_MAX_CLAIMS = "500"
+
+[http_service]
+  internal_port = 3100
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

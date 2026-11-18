@@ -1,0 +1,30 @@
+# Fly.io configuration for CKB DEX Backend API and Matching Bot
+app = "ckb-dex-backend"
+primary_region = "fra"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  PORT = "3000"
+  API_VERSION = "1"
+  NODE_ENV = "production"
+  CKB_NETWORK = "testnet"
+  CKB_RPC_URL = "https://testnet.ckb.dev"
+  CONFIRMATION_DEPTH = "10"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
