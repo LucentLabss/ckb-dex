@@ -9,7 +9,7 @@
  */
 const env = import.meta.env;
 
-const DEPLOYED_API_ORIGIN = "https://api.72.62.119.247.sslip.io";
+const DEPLOYED_API_ORIGIN = "https://ckb-dex-backend.fly.dev";
 const DEPLOYED_FAUCET_URL = "https://faucet.72.62.119.247.sslip.io/api/v1/faucet";
 
 export const API_URL = env.VITE_API_URL || `${DEPLOYED_API_ORIGIN}/api/v1`;
