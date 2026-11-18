@@ -449,6 +449,7 @@ dependencies = [
  "buddy-alloc",
  "cc",
  "ckb-gen-types",
+ "ckb-hash",
  "ckb-x64-simulator",
  "gcd",
  "int-enum",
@@ -686,11 +687,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dex-market-config"
+version = "0.1.0"
+dependencies = [
+ "ckb-std",
+ "dex-v2-core",
+]
+
+[[package]]
 name = "dex-order-lock"
 version = "0.1.0"
 dependencies = [
  "ckb-std",
 ]
+
+[[package]]
+name = "dex-order-lock-v2"
+version = "0.1.0"
+dependencies = [
+ "ckb-std",
+ "dex-v2-core",
+]
+
+[[package]]
+name = "dex-v2-core"
+version = "0.1.0"
 
 [[package]]
 name = "digest"
@@ -1096,13 +1117,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "lock-script-contract"
-version = "0.1.0"
-dependencies = [
- "ckb-std",
-]
 
 [[package]]
 name = "log"
@@ -1815,6 +1829,7 @@ name = "tests"
 version = "0.1.0"
 dependencies = [
  "ckb-testtool",
+ "dex-v2-core",
  "serde_json",
 ]
 
