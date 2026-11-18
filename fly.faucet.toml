@@ -10,7 +10,8 @@ primary_region = "fra"
   NODE_ENV = "production"
   CKB_NETWORK = "testnet"
   CKB_RPC_URL = "https://testnet.ckb.dev"
-  FAUCET_DRIP_AMOUNT = "100"
+  FAUCET_DRIP_AMOUNT = "1000"
+  FAUCET_COOLDOWN_HOURS = "24"
   FAUCET_DAILY_MAX_CLAIMS = "500"
 
 [http_service]
