@@ -10,7 +10,7 @@
 const env = import.meta.env;
 
 const DEPLOYED_API_ORIGIN = "https://ckb-dex-backend.fly.dev";
-const DEPLOYED_FAUCET_URL = "https://faucet.72.62.119.247.sslip.io/api/v1/faucet";
+const DEPLOYED_FAUCET_URL = "https://ckb-dex-faucet.fly.dev/api/v1/faucet";
 
 export const API_URL = env.VITE_API_URL || `${DEPLOYED_API_ORIGIN}/api/v1`;
 /** Realtime runs on the backend's HTTP server, so it defaults to the API's origin. */
