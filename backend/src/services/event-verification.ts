@@ -12,9 +12,11 @@ import type {
 } from "../schemas/bot-events.js";
 import type { OrderDocument } from "../models/order.js";
 import { decodeDexOrderArgs } from "../utils/dex-order-args.js";
+import { decodeDexV2Order, ORDER_ARGS_LEN } from "../utils/dex-v2-codec.js";
+import { toBuffer } from "../utils/shared.js";
 import type { Hex } from "../types/index.js";
 
-type OrderFacts = Pick<OrderDocument, "_id" | "direction" | "ownerLockHash" | "xudtTypeHash" | "pricePerToken" | "remainingAmount">;
+type OrderFacts = Pick<OrderDocument, "_id" | "direction" | "ownerLockHash" | "xudtTypeHash" | "pricePerToken" | "remainingAmount" | "orderVersion" | "refundAfter">;
 
 export type LoadOrders = (ids: string[]) => Promise<OrderFacts[]>;
 
@@ -79,6 +81,35 @@ async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerifica
   if (!sameHex(output.data, event.order.cellData)) return reject("cell data differs from the chain");
   if (output.capacity !== BigInt(event.order.capacity)) return reject("capacity differs from the chain");
 
+  const argsBuf = toBuffer(output.lock.args as Hex);
+
+  // V2 Order Lock Verification (243 bytes)
+  if (argsBuf.length === ORDER_ARGS_LEN) {
+    const v2 = (() => {
+      try {
+        return decodeDexV2Order(argsBuf);
+      } catch (error) {
+        return reject(error instanceof Error ? error.message : "undecodable v2 order args");
+      }
+    })();
+
+    const expectedDir = v2.side === "BUY" ? "BID" : "ASK";
+    if (expectedDir !== event.order.direction) return reject("direction differs from lock args");
+    if (!sameHex(v2.owner, event.order.ownerLockHash)) return reject("maker differs from lock args");
+
+    if (v2.side === "SELL") {
+      const held = ccc.numLeFromBytes(ccc.bytesFrom(output.data).slice(0, 16));
+      if (ccc.bytesFrom(output.data).length < 16 || held !== v2.remainingOffer) {
+        return reject("held token amount differs from lock args");
+      }
+    }
+
+    if (!sameHex(scriptHash(event.order.ownerLock), v2.owner)) return reject("owner lock does not hash to the maker lock hash");
+    if (!tx.inputLockHashes.some((hash) => sameHex(hash, v2.owner))) return reject("maker did not fund the order transaction");
+    return;
+  }
+
+  // V1 Legacy Order Lock Verification (90 bytes)
   const decoded = (() => {
     try {
       return decodeDexOrderArgs(output.lock.args);
@@ -113,7 +144,14 @@ async function verifyOrderCancelled(event: OrderCancelledEvent, v: ChainVerifica
   if (!order) return; // ingestion reports order-not-found itself
   const tx = await requireConfirmed(v, event.cancelledByTxHash as Hex, event);
   if (!spends(tx, event.outPoint)) return reject("transaction does not spend the order cell");
-  if (!tx.inputLockHashes.some((hash) => sameHex(hash, order.ownerLockHash))) return reject("spend is not authorized by the maker lock");
+  const isOwnerAuthorized = tx.inputLockHashes.some((hash) => sameHex(hash, order.ownerLockHash));
+  if (!isOwnerAuthorized) {
+    // V2 timed refund allows permissionless spend after refund_after
+    if (order.orderVersion === 2 && order.refundAfter && BigInt(order.refundAfter) > 0n) {
+      return;
+    }
+    return reject("spend is not authorized by the maker lock");
+  }
 }
 
 async function verifySettlementSubmitted(event: SettlementSubmittedEvent, v: ChainVerification): Promise<void> {
@@ -139,11 +177,14 @@ async function verifyTradeConfirmed(event: TradeConfirmedEvent, v: ChainVerifica
     return reject("settlement does not spend both orders");
   }
 
+  const isV2 = buy.orderVersion === 2 || sell.orderVersion === 2;
   const matches =
     sameHex(event.trade.buyerLockHash, buy.ownerLockHash) &&
     sameHex(event.trade.sellerLockHash, sell.ownerLockHash) &&
     sameHex(event.trade.xudtTypeHash, sell.xudtTypeHash) &&
-    event.trade.tokenAmount === sell.remainingAmount &&
+    (isV2
+      ? BigInt(event.trade.tokenAmount) <= BigInt(sell.remainingAmount)
+      : event.trade.tokenAmount === sell.remainingAmount) &&
     event.trade.price === sell.pricePerToken;
   if (!matches) return reject("trade fields differ from the matched orders");
 }

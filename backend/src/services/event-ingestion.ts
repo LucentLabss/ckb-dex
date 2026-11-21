@@ -21,6 +21,9 @@ import { RealtimeBroadcaster } from "./realtime.js";
 import AppError from "./error.js";
 import { getChainVerification } from "./chain-verifier.js";
 import { verifyEvent } from "./event-verification.js";
+import { decodeDexV2Order, ORDER_ARGS_LEN } from "../utils/dex-v2-codec.js";
+import { toBuffer } from "../utils/shared.js";
+import type { Hex } from "../types/index.js";
 
 type IngestionResultStatus = "APPLIED" | "IGNORED";
 
@@ -258,6 +261,34 @@ export class EventIngestionService {
       reservedUntil: null,
       pendingTxHash: null,
     };
+
+    try {
+      const argsBuf = toBuffer(event.order.lockScript.args as Hex);
+      if (argsBuf.length === ORDER_ARGS_LEN) {
+        const v2 = decodeDexV2Order(argsBuf);
+        updatePayload.orderVersion = 2;
+        updatePayload.kind = v2.kind;
+        updatePayload.marketConfigHash = v2.market;
+        updatePayload.clientNonce = v2.nonce;
+        updatePayload.priceNum = v2.priceNum.toString();
+        updatePayload.priceDen = v2.priceDen.toString();
+        updatePayload.initialBase = v2.initialBase.toString();
+        updatePayload.remainingBase = v2.remainingBase.toString();
+        updatePayload.remainingOffer = v2.remainingOffer.toString();
+        updatePayload.feeReserve = v2.feeReserve.toString();
+        updatePayload.costBudget = v2.costBudget.toString();
+        updatePayload.maxNetworkFee = v2.maxNetworkFee.toString();
+        updatePayload.maxRefundFee = v2.maxRefundFee.toString();
+        updatePayload.refundAfter = v2.refundAfter.toString();
+        updatePayload.minFill = v2.minFill.toString();
+        const effectivePrice = Number(v2.priceNum) / Number(v2.priceDen);
+        updatePayload.priceValue = mongoose.Types.Decimal128.fromString(effectivePrice.toString());
+        updatePayload.remainingAmount = v2.remainingBase.toString();
+        updatePayload.pricePerToken = effectivePrice.toString();
+      }
+    } catch {
+      // If not V2 args, fall back to legacy fields already populated above
+    }
 
     await OrderModel.findByIdAndUpdate(
       orderId,
