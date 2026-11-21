@@ -8,6 +8,7 @@ import {
   NATIVE_ASSET_HASH,
 } from "../utils/dex-v2-codec.js";
 import { ccc } from "@ckb-ccc/core";
+import { Hex } from "../types/index.js";
 
 const DUMMY_HASH_1 = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const DUMMY_HASH_2 = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -62,7 +63,7 @@ test("buildV2Settlement builds a valid 2-order full fill settlement transaction 
     kind: "LIMIT",
     owner: DUMMY_HASH_4,
     market: DUMMY_HASH_2,
-    nonce: "0x" + "b".repeat(64),
+    nonce: ("0x" + "b".repeat(64)) as Hex,
     priceNum: 50n,
     priceDen: 1n,
     initialBase: 500n,
@@ -150,7 +151,7 @@ test("buildV2Settlement handles partial fill and creates successor cell", () => 
     kind: "LIMIT",
     owner: DUMMY_HASH_4,
     market: DUMMY_HASH_2,
-    nonce: "0x" + "b".repeat(64),
+    nonce: ("0x" + "b".repeat(64)) as Hex,
     priceNum: 50n,
     priceDen: 1n,
     initialBase: 400n,

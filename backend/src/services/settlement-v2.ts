@@ -19,10 +19,10 @@ import { toBuffer, toHex } from "../utils/shared.js";
 
 export interface SettlementInputOrder {
   order: DexV2Order;
-  outPoint: { txHash: Hex; index: number };
+  outPoint: { txHash: string; index: number };
   cellCapacity: bigint;
-  ownerLock: Script;
-  typeScript?: Script;
+  ownerLock: ccc.ScriptLike;
+  typeScript?: ccc.ScriptLike;
   cellData: Hex;
 }
 
@@ -112,7 +112,7 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
   const outputsData: Hex[] = [];
 
   // Helper to add an output
-  const addOutput = (lock: Script, capacity: bigint, type?: Script, data: Hex = "0x"): number => {
+  const addOutput = (lock: ccc.ScriptLike, capacity: bigint, type?: ccc.ScriptLike, data: Hex = "0x"): number => {
     const idx = outputs.length;
     outputs.push({
       lock,
@@ -215,6 +215,7 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
 
       // Check if partial fill -> Successor order
       const remainingBase = ord.remainingBase - fillBase;
+      const remainingOffer = remainingBase;
       const cost = networkFee + storageShare;
       if (ord.costBudget < cost) {
         throw new AppError(400, `order cost budget ${ord.costBudget} is insufficient for required cost ${cost}`);
@@ -317,9 +318,11 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
 
   // Set witness for input 0
   tx.witnesses = [
-    ccc.WitnessArgs.from({
-      lock: settlementWitness,
-    }).toBytes(),
+    ccc.hexFrom(
+      ccc.WitnessArgs.from({
+        lock: settlementWitness,
+      }).toBytes(),
+    ),
   ];
 
   return {

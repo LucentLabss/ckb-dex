@@ -59,7 +59,7 @@ test("AppConfiguration defaults to the manifest's testnet deployment", async () 
 });
 
 test("AppConfiguration refuses to start without an internal ingestion token", async () => {
-  await withEnvOverrides({ INTERNAL_BOT_TOKEN: undefined }, async () => {
+  await withEnvOverrides({ INTERNAL_BOT_TOKEN: undefined, CKB_DEX_SCRIPT_CODE_HASH: undefined, CKD_DEX_SCRIPT_CODE_HASH: undefined }, async () => {
     await assert.rejects(new AppConfiguration().getEnvironment(), /INTERNAL_BOT_TOKEN/);
   });
 });

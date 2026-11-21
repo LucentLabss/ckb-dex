@@ -17,6 +17,14 @@ export type OrderDoc = HydratedDocumentFromSchema<typeof OrderSchema>;
 export { decodeDexOrderArgs } from "../utils/dex-order-args.js";
 export type { DecodedDexOrderArgs } from "../utils/dex-order-args.js";
 import { decodeDexOrderArgs, type DecodedDexOrderArgs } from "../utils/dex-order-args.js";
+import {
+  ORDER_ARGS_LEN,
+  decodeDexV2Order,
+  decodeDexV2MarketConfig,
+  type DexV2Order,
+  type DexV2MarketConfig,
+} from "../utils/dex-v2-codec.js";
+import { buildV2Settlement, type SettlementInputOrder } from "../services/settlement-v2.js";
 
 interface DexOrderBotTrait {
   readonly config: Config;
@@ -71,6 +79,44 @@ export default class DexOrderBot implements DexOrderBotTrait {
     this.xudtCellDeps = deployment.knownScripts.XUdt.cellDeps.map(({ cellDep }) => cellDep);
     this.supportedAssetHashes = new Set(deployment.assets.map((asset) =>
       ccc.Script.from(getAssetType(deployment, asset.id)).hash()));
+  }
+
+  private _marketConfigs: Map<string, { config: DexV2MarketConfig; cellDep: ccc.CellDepLike }> | undefined;
+
+  private get marketConfigs(): Map<string, { config: DexV2MarketConfig; cellDep: ccc.CellDepLike }> {
+    return (this._marketConfigs ??= new Map());
+  }
+
+  registerMarketConfig(marketHash: string, config: DexV2MarketConfig, cellDep: ccc.CellDepLike): void {
+    this.marketConfigs.set(marketHash.toLowerCase(), { config, cellDep });
+  }
+
+  async resolveMarketConfig(marketHash: Hex): Promise<{ config: DexV2MarketConfig; cellDep: ccc.CellDepLike } | undefined> {
+    const cached = this.marketConfigs.get(marketHash.toLowerCase());
+    if (cached) return cached;
+
+    try {
+      for await (const cell of this.client.findCells({
+        script: { codeHash: marketHash, hashType: "type", args: "0x" },
+        scriptType: "type",
+        scriptSearchMode: "prefix",
+        withData: true,
+      })) {
+        if (cell.cellOutput.type?.hash() === marketHash) {
+          const decoded = decodeDexV2MarketConfig(cell.outputData);
+          const cellDep: ccc.CellDepLike = {
+            outPoint: cell.outPoint,
+            depType: "code",
+          };
+          const resolved = { config: decoded, cellDep };
+          this.marketConfigs.set(marketHash.toLowerCase(), resolved);
+          return resolved;
+        }
+      }
+    } catch {
+      // Indexer fallback or cell search failed
+    }
+    return undefined;
   }
 
   async init(): Promise<void> {
@@ -145,6 +191,29 @@ export default class DexOrderBot implements DexOrderBotTrait {
     ) {
       throw new AppError(400, "script is not the configured DEX order lock script");
     }
+
+    const buf = toBuffer(script.args);
+    if (buf.length === ORDER_ARGS_LEN) {
+      const v2 = decodeDexV2Order(buf);
+      return {
+        makerLockHash: v2.owner,
+        direction: v2.side === "BUY" ? "BID" : "ASK",
+        udtTypeHash: v2.market,
+        tokenAmount: v2.remainingBase,
+        pricePerToken: v2.priceNum,
+        orderVersion: 2,
+        marketConfigHash: v2.market,
+        priceNum: v2.priceNum,
+        priceDen: v2.priceDen,
+        feeReserve: v2.feeReserve,
+        costBudget: v2.costBudget,
+        maxNetworkFee: v2.maxNetworkFee,
+        maxRefundFee: v2.maxRefundFee,
+        refundAfter: v2.refundAfter,
+        minFill: v2.minFill,
+      };
+    }
+
     return decodeDexOrderArgs(script.args);
   }
 
@@ -276,6 +345,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
    * No signer needed - the lock script has no signature check, only structural rules.
    */
   async executeTrade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex> {
+    if (buyOrder.orderVersion === 2 || sellOrder.orderVersion === 2) {
+      return this.executeV2Trade(buyOrder, sellOrder);
+    }
+
     if (!this.supportedAssetHashes.has(buyOrder.xudtTypeHash as string)) {
       throw new AppError(400, "Token type is not listed in the deployment manifest");
     }
@@ -391,6 +464,140 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   /**
+   * Builds and submits a Smart Contract V2 settlement transaction with witness and treasury accounting.
+   */
+  async executeV2Trade(buyOrder: OrderDoc, sellOrder: OrderDoc): Promise<Hex> {
+    const marketHash = (buyOrder.marketConfigHash ?? sellOrder.marketConfigHash) as Hex;
+    if (!marketHash) {
+      throw new AppError(400, "V2 trade requires a market configuration hash");
+    }
+    if (buyOrder.direction !== "BID" || sellOrder.direction !== "ASK") {
+      throw new AppError(400, "executeTrade requires a BID (buy) order and an ASK (sell) order");
+    }
+
+    const marketInfo = await this.resolveMarketConfig(marketHash);
+    if (!marketInfo) {
+      throw new AppError(400, `unable to resolve market configuration for ${marketHash}`);
+    }
+
+    const buyV2 = this.toDexV2Order(buyOrder);
+    const sellV2 = this.toDexV2Order(sellOrder);
+
+    const inputOrders: SettlementInputOrder[] = [
+      {
+        order: buyV2,
+        outPoint: {
+          txHash: buyOrder.outPoint!.txHash,
+          index: Number(buyOrder.outPoint!.index),
+        },
+        cellCapacity: BigInt(buyOrder.capacity),
+        ownerLock: buyOrder.ownerLock as ccc.ScriptLike,
+        cellData: (buyOrder.cellData ?? "0x") as Hex,
+      },
+      {
+        order: sellV2,
+        outPoint: {
+          txHash: sellOrder.outPoint!.txHash,
+          index: Number(sellOrder.outPoint!.index),
+        },
+        cellCapacity: BigInt(sellOrder.capacity),
+        ownerLock: sellOrder.ownerLock as ccc.ScriptLike,
+        cellData: (sellOrder.cellData ?? "0x") as Hex,
+      },
+    ];
+
+    const takerIndex = BigInt(buyOrder.blockNumber ?? 0) >= BigInt(sellOrder.blockNumber ?? 0) ? 0 : 1;
+
+    const settlement = buildV2Settlement({
+      orders: inputOrders,
+      takerIndex,
+      market: marketInfo.config,
+      dexOrderLockCellDep: this.dexCellDeps[0],
+      marketConfigCellDep: marketInfo.cellDep,
+      xudtCellDeps: this.xudtCellDeps,
+    });
+
+    const reservedBuy = await this.reserve(buyOrder._id!);
+    if (!reservedBuy) {
+      throw new AppError(409, `buy order ${buyOrder._id} is no longer LIVE`);
+    }
+
+    const reservedSell = await this.reserve(sellOrder._id!);
+    if (!reservedSell) {
+      await this.revertToLive(reservedBuy._id!);
+      throw new AppError(409, `sell order ${sellOrder._id} is no longer LIVE`);
+    }
+
+    try {
+      const [buyStillLive, sellStillLive] = await Promise.all([
+        this.checkOrderLiveness(reservedBuy),
+        this.checkOrderLiveness(reservedSell),
+      ]);
+      if (!buyStillLive || !sellStillLive) {
+        throw new AppError(409, "one of the matched orders was already settled on-chain");
+      }
+
+      const txHash = await this.submit(settlement.tx);
+
+      try {
+        await this.ingestionService.ingest({
+          schemaVersion: 1,
+          eventId: `settlement-submitted:${txHash}`,
+          occurredAt: new Date().toISOString(),
+          eventType: "settlement-submitted",
+          orderOutPoints: [
+            { txHash: reservedBuy.outPoint!.txHash as Hex, index: reservedBuy.outPoint!.index.toString() },
+            { txHash: reservedSell.outPoint!.txHash as Hex, index: reservedSell.outPoint!.index.toString() },
+          ],
+          settlementTxHash: txHash,
+        } as BotEvent);
+      } catch (ingestErr) {
+        console.error(`settlement ${txHash} submitted but not recorded; tracking directly`, ingestErr);
+        await Order.updateMany(
+          { _id: { $in: [reservedBuy._id!, reservedSell._id!] } },
+          { $set: { status: "PENDING", pendingTxHash: txHash, settlementTxHash: txHash } },
+        );
+      }
+
+      return txHash;
+    } catch (err) {
+      await Promise.all([
+        this.revertToLive(reservedBuy._id!),
+        this.revertToLive(reservedSell._id!),
+      ]);
+      throw err;
+    }
+  }
+
+  private toDexV2Order(order: OrderDoc): DexV2Order {
+    if (order.lockScript?.args) {
+      const buf = toBuffer(order.lockScript.args as Hex);
+      if (buf.length === ORDER_ARGS_LEN) {
+        return decodeDexV2Order(buf);
+      }
+    }
+    return {
+      side: order.direction === "BID" ? "BUY" : "SELL",
+      kind: (order.kind as any) ?? "LIMIT",
+      owner: (order.ownerLockHash ?? "0x") as Hex,
+      market: (order.marketConfigHash ?? "0x") as Hex,
+      nonce: ((order.clientNonce ?? "0x" + "00".repeat(32)) as Hex),
+      priceNum: BigInt(order.priceNum ?? order.pricePerToken?.toString() ?? "0"),
+      priceDen: BigInt(order.priceDen ?? "1"),
+      initialBase: BigInt(order.initialBase ?? order.remainingAmount?.toString() ?? "0"),
+      remainingBase: BigInt(order.remainingBase ?? order.remainingAmount?.toString() ?? "0"),
+      remainingOffer: BigInt(order.remainingOffer ?? "0"),
+      feeReserve: BigInt(order.feeReserve ?? "0"),
+      costBudget: BigInt(order.costBudget ?? "50000000000"),
+      maxNetworkFee: BigInt(order.maxNetworkFee ?? "10000000"),
+      maxRefundFee: BigInt(order.maxRefundFee ?? "5000000"),
+      refundAfter: BigInt(order.refundAfter ?? "0"),
+      minFill: BigInt(order.minFill ?? "1"),
+    };
+  }
+
+
+  /**
    * Sends the settlement, translating node rejections caused by other matchers racing us:
    * an identical tx already in the pool is success; a spent input or a conflicting pool tx
    * means someone else is settling these orders.
@@ -418,38 +625,38 @@ export default class DexOrderBot implements DexOrderBotTrait {
    * one SELL) among `orders`, preferring the oldest order on each side within a match.
    */
   findMatch(orders: OrderDoc[]): { buy: OrderDoc; sell: OrderDoc } | undefined {
-    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
-
-    for (const order of this.sort(orders)) {
-      const key = this.matchGroupKey(order);
-      const bucket = groups.get(key) ?? { buys: [], sells: [] };
-      (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
-      groups.set(key, bucket);
-    }
-
-    for (const { buys, sells } of groups.values()) {
-      if (buys.length > 0 && sells.length > 0) {
-        return { buy: buys[0], sell: sells[0] };
-      }
-    }
-    return undefined;
+    return this.findMatches(orders)[0];
   }
 
   /**
-   * Every non-overlapping exact-match pair, best priority first. Quarantined orders and pairs
-   * in backoff are skipped, so a pair that keeps failing never hides the other matches.
+   * Every non-overlapping match pair, best priority first.
+   * Handles V1 exact-matches and V2 partial-fill / price-crossing matches.
+   * Quarantined orders and pairs in backoff are skipped, so a pair that keeps failing
+   * never hides the other matches.
    */
   findMatches(orders: OrderDoc[], now: number = Date.now()): Array<{ buy: OrderDoc; sell: OrderDoc }> {
-    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+    const v1Orders: OrderDoc[] = [];
+    const v2Orders: OrderDoc[] = [];
+
     for (const order of this.sort(orders)) {
       if (this.health.isOrderQuarantined(order._id!, now)) continue;
+      if (order.orderVersion === 2 || (order.marketConfigHash && order.marketConfigHash !== "0x")) {
+        v2Orders.push(order);
+      } else {
+        v1Orders.push(order);
+      }
+    }
+
+    const pairs: Array<{ buy: OrderDoc; sell: OrderDoc }> = [];
+
+    // V1 matching (exact match on token, amount, and price)
+    const groups = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+    for (const order of v1Orders) {
       const key = this.matchGroupKey(order);
       const bucket = groups.get(key) ?? { buys: [], sells: [] };
       (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
       groups.set(key, bucket);
     }
-
-    const pairs: Array<{ buy: OrderDoc; sell: OrderDoc }> = [];
     for (const { buys, sells } of groups.values()) {
       const taken = new Set<string>();
       for (const buy of buys) {
@@ -460,6 +667,50 @@ export default class DexOrderBot implements DexOrderBotTrait {
         pairs.push({ buy, sell });
       }
     }
+
+    // V2 matching (partial fills and price-crossing)
+    const v2Markets = new Map<string, { buys: OrderDoc[]; sells: OrderDoc[] }>();
+    for (const order of v2Orders) {
+      const key = (order.marketConfigHash ?? order.xudtTypeHash ?? "default").toLowerCase();
+      const bucket = v2Markets.get(key) ?? { buys: [], sells: [] };
+      (order.direction === "BID" ? bucket.buys : bucket.sells).push(order);
+      v2Markets.set(key, bucket);
+    }
+
+    for (const { buys, sells } of v2Markets.values()) {
+      const taken = new Set<string>();
+      for (const buy of buys) {
+        const buyPriceNum = BigInt(buy.priceNum ?? buy.pricePerToken.toString());
+        const buyPriceDen = BigInt(buy.priceDen ?? 1);
+        const buyRemaining = BigInt(buy.remainingBase ?? buy.remainingAmount);
+        const buyMinFill = BigInt(buy.minFill ?? 1);
+
+        for (const sell of sells) {
+          if (taken.has(sell._id!) || this.health.isPairBlocked(buy._id!, sell._id!, now)) {
+            continue;
+          }
+
+          const sellPriceNum = BigInt(sell.priceNum ?? sell.pricePerToken.toString());
+          const sellPriceDen = BigInt(sell.priceDen ?? 1);
+          const sellRemaining = BigInt(sell.remainingBase ?? sell.remainingAmount);
+          const sellMinFill = BigInt(sell.minFill ?? 1);
+
+          // Price crossing check: buy.price >= sell.price (or market order)
+          const isMarket = buy.kind === "MARKET" || sell.kind === "MARKET";
+          const crossesPrice = isMarket || (buyPriceNum * sellPriceDen >= sellPriceNum * buyPriceDen);
+          if (!crossesPrice) continue;
+
+          // Min fill check
+          const fillBase = buyRemaining < sellRemaining ? buyRemaining : sellRemaining;
+          if (fillBase < buyMinFill || fillBase < sellMinFill) continue;
+
+          taken.add(sell._id!);
+          pairs.push({ buy, sell });
+          break; // proceed to next buy
+        }
+      }
+    }
+
     return pairs;
   }
 
@@ -640,31 +891,45 @@ export default class DexOrderBot implements DexOrderBotTrait {
       return undefined;
     }
 
-    if (!this.supportedAssetHashes.has(decoded.udtTypeHash)) {
-      console.warn(`skipping dex order cell ${id}: unsupported manifest asset`);
-      return undefined;
-    }
-
-    if (decoded.direction === "ASK") {
-      // A SELL order cell must hold exactly the declared xUDT and amount up front.
-      if (!cell.cellOutput.type || cell.cellOutput.type.hash() !== decoded.udtTypeHash) {
-        console.warn(`skipping dex order cell ${id}: missing or mismatched xUDT type script`);
-        return undefined;
-      }
-      const heldAmount = this.decodeUdtAmount(cell.outputData);
-      if (heldAmount === undefined || heldAmount !== decoded.tokenAmount) {
-        console.warn(`skipping dex order cell ${id}: cell token amount does not match declared args`);
-        return undefined;
+    if (decoded.orderVersion === 2) {
+      if (decoded.direction === "ASK") {
+        if (!cell.cellOutput.type) {
+          console.warn(`skipping dex order cell ${id}: SELL order cell must carry a type script`);
+          return undefined;
+        }
+        const heldAmount = this.decodeUdtAmount(cell.outputData);
+        if (heldAmount === undefined || heldAmount !== decoded.tokenAmount) {
+          console.warn(`skipping dex order cell ${id}: cell token amount does not match declared args`);
+          return undefined;
+        }
       }
     } else {
-      // A BUY order cell must hold plain CKB only - no type script, no token data.
-      if (cell.cellOutput.type) {
-        console.warn(`skipping dex order cell ${id}: BUY order cell must not carry a type script`);
+      if (!this.supportedAssetHashes.has(decoded.udtTypeHash)) {
+        console.warn(`skipping dex order cell ${id}: unsupported manifest asset`);
         return undefined;
       }
-      if (cell.cellOutput.capacity <= decoded.pricePerToken) {
-        console.warn(`skipping dex order cell ${id}: BUY order capacity does not exceed its own price`);
-        return undefined;
+
+      if (decoded.direction === "ASK") {
+        // A SELL order cell must hold exactly the declared xUDT and amount up front.
+        if (!cell.cellOutput.type || cell.cellOutput.type.hash() !== decoded.udtTypeHash) {
+          console.warn(`skipping dex order cell ${id}: missing or mismatched xUDT type script`);
+          return undefined;
+        }
+        const heldAmount = this.decodeUdtAmount(cell.outputData);
+        if (heldAmount === undefined || heldAmount !== decoded.tokenAmount) {
+          console.warn(`skipping dex order cell ${id}: cell token amount does not match declared args`);
+          return undefined;
+        }
+      } else {
+        // A BUY order cell must hold plain CKB only - no type script, no token data.
+        if (cell.cellOutput.type) {
+          console.warn(`skipping dex order cell ${id}: BUY order cell must not carry a type script`);
+          return undefined;
+        }
+        if (cell.cellOutput.capacity <= decoded.pricePerToken) {
+          console.warn(`skipping dex order cell ${id}: BUY order capacity does not exceed its own price`);
+          return undefined;
+        }
       }
     }
 
@@ -673,11 +938,21 @@ export default class DexOrderBot implements DexOrderBotTrait {
       return undefined;
     }
 
-    // Trust the owner lock only if it appears among the creating tx's own inputs.
-    const ownerLock = await this.findInputWithLockHash(
+    // Trust the owner lock only if it appears among the creating tx's own inputs,
+    // or if this cell is a successor order whose lineage is known in the DB.
+    let ownerLock = await this.findInputWithLockHash(
       creatingTx.transaction,
       decoded.makerLockHash,
     );
+    if (!ownerLock) {
+      const prevOrder = await Order.findOne({
+        ownerLockHash: decoded.makerLockHash,
+        ownerLock: { $exists: true, $ne: null },
+      }).lean();
+      if (prevOrder?.ownerLock) {
+        ownerLock = ccc.Script.from(prevOrder.ownerLock as ccc.ScriptLike);
+      }
+    }
     if (!ownerLock) {
       console.warn(
         `skipping dex order cell ${id}: no creating-tx input matches maker lock hash ${decoded.makerLockHash}`,
@@ -763,10 +1038,24 @@ export default class DexOrderBot implements DexOrderBotTrait {
     );
 
     if (!cancellationInput) {
-      // Settled by another matcher (or a replaced transaction of ours): record it as a trade
-      // through ingestion so it is chain-verified and buried before the orders turn FILLED.
-      await this.confirmExternalSettlement(spendingTx);
-      return;
+      const isTimedRefund =
+        order.orderVersion === 2 &&
+        order.refundAfter &&
+        BigInt(order.refundAfter) > 0n &&
+        spendingTx.transaction.inputs.some(
+          (input) =>
+            input.previousOutput.txHash === order.outPoint!.txHash &&
+            input.previousOutput.index.toString() === order.outPoint!.index.toString() &&
+            input.since !== undefined &&
+            BigInt(input.since) !== 0n,
+        );
+
+      if (!isTimedRefund) {
+        // Settled by another matcher (or a replaced transaction of ours): record it as a trade
+        // through ingestion so it is chain-verified and buried before the orders turn FILLED.
+        await this.confirmExternalSettlement(spendingTx);
+        return;
+      }
     }
 
     // Route through the same ingestion pipeline order-confirmed/trade-confirmed already

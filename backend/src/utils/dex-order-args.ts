@@ -25,6 +25,16 @@ export interface DecodedDexOrderArgs {
   udtTypeHash: Hex;
   tokenAmount: bigint;
   pricePerToken: bigint;
+  orderVersion?: number;
+  marketConfigHash?: Hex;
+  priceNum?: bigint;
+  priceDen?: bigint;
+  feeReserve?: bigint;
+  costBudget?: bigint;
+  maxNetworkFee?: bigint;
+  maxRefundFee?: bigint;
+  refundAfter?: bigint;
+  minFill?: bigint;
 }
 
 export function decodeDexOrderArgs(args: Hex): DecodedDexOrderArgs {
