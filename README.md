@@ -122,7 +122,7 @@ and Invalid.
 
 | Path | Contents |
 | --- | --- |
-| `smart-contract/` | Rust CKB contracts (`dex-order-lock`, `lock-script-contract`) and tests |
+| `smart-contract/` | Legacy v1 DEX, v2 order/market contracts, shared Rust types, and tests |
 | `backend/` | Express + MongoDB API, matching bot, event ingestion, WebSocket broadcaster |
 | `ui/` | Vite + React 19 trading UI using CCC wallet connector |
 | `faucet/` | Express service that drips test xUDT with a per-claim cooldown |
@@ -249,6 +249,13 @@ The backend needs MongoDB reachable at startup; its "demo mode" fallback does
 not work reliably yet.
 
 ## Smart contract development
+
+Orderbook v2 scripts are implemented separately in
+[`dex-order-lock-v2`](smart-contract/contracts/dex-order-lock-v2/README.md) and
+[`dex-market-config`](smart-contract/contracts/dex-market-config/README.md).
+They support multi-asset partial fills, bounded market orders, user-funded costs,
+and admin-controlled market settings. Each README documents the transaction
+format. The deployed application and its builders still use v1.
 
 Smart contract source, build instructions, and tests are in `smart-contract/`.
 The DEX lock's validation details and error codes are documented in

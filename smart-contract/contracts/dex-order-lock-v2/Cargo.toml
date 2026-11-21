@@ -1,11 +1,11 @@
 [package]
-name = "lock-script-contract"
+name = "dex-order-lock-v2"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 ckb-std = "1.1"
+dex-v2-core = { path = "../../crates/dex-v2-core" }
 
 [features]
 library = []
-native-simulator = ["library", "ckb-std/native-simulator"]
