@@ -4,3 +4,4 @@
 // export * from "./trade-execution.js";
 export * from "./db.js";
 export * from "./event-ingestion.js";
+export * from "./settlement-v2.js";
