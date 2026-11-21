@@ -23,6 +23,13 @@ export interface TradeDocument {
   blockNumber: string;
   blockHash: string;
   confirmedAtBlock: string;
+  /** V2 Trade fields */
+  executedBase?: string;
+  executedQuote?: string;
+  makerFee?: string;
+  takerFee?: string;
+  treasuryLockHash?: string;
+  isPartialFill?: boolean;
   /** Numeric copy of blockNumber so trades can be sorted and paged by the database. */
   blockNum?: number;
   /** REVERTED once the block that confirmed the settlement is reorged out. */
@@ -52,6 +59,12 @@ export const TradeSchema = new Schema<TradeDocument>(
     tokenAmount: { type: String, required: true, immutable: true },
     price: { type: String, required: true, immutable: true },
     paidCapacity: { type: String, required: true, immutable: true },
+    executedBase: { type: String },
+    executedQuote: { type: String },
+    makerFee: { type: String },
+    takerFee: { type: String },
+    treasuryLockHash: { type: String },
+    isPartialFill: { type: Boolean, default: false },
     blockNumber: { type: String, required: true },
     blockHash: { type: String, required: true },
     confirmedAtBlock: { type: String, required: true },

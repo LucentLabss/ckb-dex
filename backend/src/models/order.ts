@@ -55,6 +55,24 @@ export interface OrderDocument {
   totalAskCapacity?: string;
   createdAtBlock?: string;
   createdAtTxHash?: string;
+  /** V2 Smart Contract fields */
+  orderVersion?: number;
+  kind?: "LIMIT" | "MARKET";
+  marketConfigHash?: string;
+  clientNonce?: string;
+  priceNum?: string;
+  priceDen?: string;
+  initialBase?: string;
+  remainingBase?: string;
+  remainingOffer?: string;
+  feeReserve?: string;
+  costBudget?: string;
+  maxNetworkFee?: string;
+  maxRefundFee?: string;
+  refundAfter?: string;
+  minFill?: string;
+  parentOrderOutPoint?: { txHash: string; index: string };
+  successorOrderOutPoint?: { txHash: string; index: string };
   /**
    * Numeric shadow keys so the database can sort and page: the string fields above hold
    * u64-sized values that sort lexicographically. Derived from the strings on ingestion.
@@ -136,6 +154,23 @@ export const OrderSchema = new Schema<OrderDocument>(
     totalAskCapacity: { type: String },
     createdAtBlock: { type: String },
     createdAtTxHash: { type: String },
+    orderVersion: { type: Number },
+    kind: { type: String, enum: ["LIMIT", "MARKET"] },
+    marketConfigHash: { type: String },
+    clientNonce: { type: String },
+    priceNum: { type: String },
+    priceDen: { type: String },
+    initialBase: { type: String },
+    remainingBase: { type: String },
+    remainingOffer: { type: String },
+    feeReserve: { type: String },
+    costBudget: { type: String },
+    maxNetworkFee: { type: String },
+    maxRefundFee: { type: String },
+    refundAfter: { type: String },
+    minFill: { type: String },
+    parentOrderOutPoint: { type: OutPointSchema },
+    successorOrderOutPoint: { type: OutPointSchema },
     priceValue: { type: Schema.Types.Decimal128 },
     blockNum: { type: Number },
     txIdx: { type: Number },
