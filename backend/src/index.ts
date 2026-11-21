@@ -24,8 +24,8 @@ export let config: Config | undefined = undefined;
     isReady: () => databaseConnection.isConnected(),
   });
 
-  const server = app.listen(config.port, () => {
-    console.log(`Server listening at: http://localhost:${config?.port}/api/v${config?.apiVersion}`)
+  const server = app.listen(config.port, "0.0.0.0", () => {
+    console.log(`Server listening at: http://0.0.0.0:${config?.port}/api/v${config?.apiVersion}`)
   })
 
   const realtime = (app as any).locals.realtime;

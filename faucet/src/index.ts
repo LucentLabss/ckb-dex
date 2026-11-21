@@ -15,8 +15,8 @@ import TokenFaucet from "./services/faucet.js";
   await faucet.init();
 
   const app = createExpressServer(faucet);
-  const server = app.listen(config.port, () => {
-    console.log(`Faucet listening at http://localhost:${config.port}/api/v1/faucet`);
+  const server = app.listen(config.port, "0.0.0.0", () => {
+    console.log(`Faucet listening at http://0.0.0.0:${config.port}/api/v1/faucet`);
   });
 
   const shutdown = async (): Promise<void> => {
