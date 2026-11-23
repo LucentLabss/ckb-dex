@@ -74,7 +74,10 @@ async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerifica
   const output = tx.outputs[Number(event.outPoint.index)];
   if (!output) return reject("output does not exist");
 
-  if (!sameHex(output.lock.codeHash, v.dexLock.codeHash) || output.lock.hashType !== v.dexLock.hashType) {
+  const isV2Lock = sameHex(output.lock.codeHash, v.dexLock.codeHash) && output.lock.hashType === v.dexLock.hashType;
+  const isV1Lock = v.dexV1Lock && sameHex(output.lock.codeHash, v.dexV1Lock.codeHash) && output.lock.hashType === v.dexV1Lock.hashType;
+
+  if (!isV2Lock && !isV1Lock) {
     return reject("output is not locked by the configured DEX script");
   }
   if (!sameHex(output.lock.args, event.order.lockScript.args)) return reject("lock args differ from the chain");

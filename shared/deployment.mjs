@@ -58,6 +58,10 @@ export function assertSupportedAsset(ccc, deployment, type) {
   }
 }
 
+export function getMarket(deployment) {
+  return deployment.market;
+}
+
 export function assertDexConfiguration(deployment, configured) {
   if (configured.codeHash !== deployment.dex.codeHash || configured.hashType !== deployment.dex.hashType
       || configured.args !== "0x") {

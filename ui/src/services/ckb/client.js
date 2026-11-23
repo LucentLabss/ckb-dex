@@ -48,3 +48,7 @@ export const xudtCellDeps = cellDepsOf(deployment.knownScripts.XUdt);
 /** The manifest's market token (the "demo" asset). */
 export const marketAsset = deployment.assets.find((a) => a.id === "demo") ?? deployment.assets[0];
 export const marketTokenType = ccc.Script.from(getAssetType(deployment, marketAsset.id));
+
+/** The active trading pair market configuration. */
+export const marketInfo = deployment.market;
+export const marketHash = deployment.market?.marketHash;

@@ -3,7 +3,7 @@ import { ccc } from "@ckb-ccc/core";
 import type { HydratedDocumentFromSchema } from "mongoose";
 import Order, { OrderSchema } from "../models/order.js";
 import ChainCheckpoint from "../models/checkpoint.js";
-import { Config, Hex, Script } from "../types/index.js";
+import { Config, Hex, Script, HashType } from "../types/index.js";
 import type { BotEvent } from "../schemas/bot-events.js";
 import AppError from "../services/error.js";
 import { EventIngestionService } from "../services/event-ingestion.js";
@@ -61,6 +61,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private readonly dexCellDeps: ccc.CellDepLike[];
   private readonly xudtCellDeps: ccc.CellDepLike[];
   private readonly supportedAssetHashes: Set<string>;
+  private readonly v1Script?: { codeHash: Hex; hashType: HashType };
+  private readonly v1CellDeps?: ccc.CellDepLike[];
   private readonly ingestionService = new EventIngestionService();
 
   private _pendingPairOrders: OrderDoc[] = [];
@@ -77,6 +79,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
     this.client = createDeploymentClient(ccc, deployment, config.ckbRpcUrl);
     this.dexCellDeps = deployment.dex.cellDeps.map(({ cellDep }) => cellDep);
     this.xudtCellDeps = deployment.knownScripts.XUdt.cellDeps.map(({ cellDep }) => cellDep);
+    if (deployment.knownScripts.DexOrderLockV1) {
+      this.v1Script = {
+        codeHash: deployment.knownScripts.DexOrderLockV1.codeHash as Hex,
+        hashType: deployment.knownScripts.DexOrderLockV1.hashType as HashType,
+      };
+      this.v1CellDeps = deployment.knownScripts.DexOrderLockV1.cellDeps.map(({ cellDep }) => cellDep);
+    }
     this.supportedAssetHashes = new Set(deployment.assets.map((asset) =>
       ccc.Script.from(getAssetType(deployment, asset.id)).hash()));
   }
@@ -185,10 +194,15 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   deserializeLockScriptAndArgs(script: Script): DecodedDexOrderArgs {
-    if (
-      script.codeHash !== this.config.dexOrderLockScript.codeHash ||
-      script.hashType !== this.config.dexOrderLockScript.hashType
-    ) {
+    const isV2 =
+      script.codeHash === this.config.dexOrderLockScript.codeHash &&
+      script.hashType === this.config.dexOrderLockScript.hashType;
+    const isV1 =
+      this.v1Script &&
+      script.codeHash === this.v1Script.codeHash &&
+      script.hashType === this.v1Script.hashType;
+
+    if (!isV2 && !isV1) {
       throw new AppError(400, "script is not the configured DEX order lock script");
     }
 
@@ -255,6 +269,25 @@ export default class DexOrderBot implements DexOrderBotTrait {
     for await (const cell of this.client.findCells(searchKey, "asc")) {
       const order = await this.indexOrderCell(cell);
       if (order) discovered.push(order);
+    }
+
+    if (this.v1Script && this.v1Script.codeHash !== this.config.dexOrderLockScript.codeHash) {
+      const v1SearchKey: ccc.ClientIndexerSearchKeyLike = {
+        script: {
+          codeHash: this.v1Script.codeHash,
+          hashType: this.v1Script.hashType,
+          args: "0x",
+        },
+        scriptType: "lock",
+        scriptSearchMode: "prefix",
+        filter: { blockRange: [fromBlock, safeTip + 1n] },
+        withData: true,
+      };
+
+      for await (const cell of this.client.findCells(v1SearchKey, "asc")) {
+        const order = await this.indexOrderCell(cell);
+        if (order) discovered.push(order);
+      }
     }
 
     const endHashAfter = (await this.client.getHeaderByNumberNoCache(safeTip))?.hash;
@@ -391,7 +424,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
     });
 
     // Include dependencies before measuring the final transaction size and fee.
-    tx.addCellDeps(this.dexCellDeps);
+    tx.addCellDeps(this.v1CellDeps?.length ? this.v1CellDeps : this.dexCellDeps);
     tx.addCellDeps(this.xudtCellDeps);
     const allocation = allocateSettlementCapacity({
       buyCapacity: BigInt(buyOrder.capacity),

@@ -34,6 +34,7 @@ export interface ChainReader {
 export interface ChainVerification {
   chain: ChainReader;
   dexLock: Script;
+  dexV1Lock?: Script;
   confirmationDepth: number;
   supportedAssetHashes: ReadonlySet<string>;
 }
@@ -109,6 +110,13 @@ export function createChainVerification(config: Config): ChainVerification {
   return {
     chain: new CkbChainReader(client),
     dexLock: config.dexOrderLockScript,
+    dexV1Lock: deployment.knownScripts.DexOrderLockV1
+      ? {
+          codeHash: deployment.knownScripts.DexOrderLockV1.codeHash,
+          hashType: deployment.knownScripts.DexOrderLockV1.hashType,
+          args: "0x",
+        }
+      : undefined,
     confirmationDepth: config.confirmationDepth,
     supportedAssetHashes: new Set(
       deployment.assets.map((asset: { id: string }) => ccc.Script.from(getAssetType(deployment, asset.id)).hash()),

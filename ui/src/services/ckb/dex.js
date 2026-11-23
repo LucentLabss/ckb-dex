@@ -1,45 +1,115 @@
 /**
- * Builds dex-order-lock transactions (create / cancel), signed by the
- * connected wallet. Ported from ckb-dex/ui/src/lib/dex.ts.
+ * Builds dex-order-lock-v2 transactions (create / cancel), signed by the
+ * connected wallet.
  *
- * Order args (smart-contract/contracts/dex-order-lock/src/main.rs), 90 bytes:
- *   version(1) + side(1) + makerLockHash(32) + xudtTypeHash(32)
- *   + tokenAmount(u128 LE) + price(u64 LE)
- * `price` is the flat total CKB (shannons) for the whole tokenAmount, not a
- * per-token rate; a buy and a sell match only on identical amount and price.
- * Every builder first checks the RPC is on the manifest's chain (verifyChain).
+ * Order args (smart-contract/contracts/dex-order-lock-v2/src/main.rs), 243 bytes:
+ *   version(1) + side(1) + kind(1) + owner(32) + market(32) + nonce(32)
+ *   + priceNum(u128 LE) + priceDen(u128 LE) + initialBase(u128 LE)
+ *   + remainingBase(u128 LE) + remainingOffer(u128 LE) + feeReserve(u128 LE)
+ *   + costBudget(u64 LE) + maxNetworkFee(u64 LE) + maxRefundFee(u64 LE)
+ *   + refundAfter(u64 LE) + minFill(u128 LE)
+ *
+ * Cancellation witness (14 bytes):
+ *   version(1) + action(1) + refund_output_index(u32 LE) + refund_fee(u64 LE)
  */
 import { ccc } from "@ckb-ccc/connector-react";
+import {
+  BPS,
+  ORDER_ARGS_LEN as ORDER_ARGS_LEN_V2,
+  SIDE_BUY,
+  SIDE_SELL,
+  ceilDiv,
+  decodeDexV2Order,
+  encodeDexV2Order,
+  encodeDexV2RefundWitness,
+} from "../../../../shared/dex-v2-codec.mjs";
 import { MAX_SETTLEMENT_FEE } from "../../../../shared/settlement-capacity.mjs";
 import { UserError } from "../../utils/errors.js";
-import { dexScript, verifyChain, xudtCellDeps } from "./client.js";
+import { deployment, dexScript, marketHash, marketInfo, verifyChain, xudtCellDeps } from "./client.js";
 
-export const ORDER_ARGS_LEN = 90;
-export const ORDER_VERSION = 1;
-export const SIDE_BUY = 0;
-export const SIDE_SELL = 1;
+export const ORDER_ARGS_LEN_V1 = 90;
+export const ORDER_ARGS_LEN = ORDER_ARGS_LEN_V2; // 243 bytes
+export const ORDER_VERSION_V1 = 1;
+export const ORDER_VERSION = 2;
+export { SIDE_BUY, SIDE_SELL };
 const FEE_RATE = 1_000;
 
+export const DEFAULT_COST_BUDGET = 100_000_000n; // 1 CKB
+export const DEFAULT_MAX_NETWORK_FEE = 10_000n;
+export const DEFAULT_MAX_REFUND_FEE = 10_000n;
+
 /**
- * Extra CKB on a buy order for the settlement fee. The contract caps that fee
- * at MAX_SETTLEMENT_FEE (10,000 shannons) and returns everything else on the
- * order to the buyer inside their new token cell (validate_buy_order in main.rs),
- * so the headroom isn't lost. Same reserve as the team's ui/src/lib/dex.ts.
+ * Extra CKB on a buy order for the settlement fee reserve.
  */
 export const SETTLEMENT_FEE_RESERVE = 2n * MAX_SETTLEMENT_FEE;
 
-export function buildDexLock({ side, makerLockHash, xudtTypeHash, tokenAmount, price }) {
-  const args = ccc.bytesConcat(
-    new Uint8Array([ORDER_VERSION, side]),
-    ccc.bytesFrom(makerLockHash),
-    ccc.bytesFrom(xudtTypeHash),
-    ccc.numLeToBytes(tokenAmount, 16),
-    ccc.numLeToBytes(price, 8)
-  );
-  if (args.length !== ORDER_ARGS_LEN) {
-    throw new Error(`Expected ${ORDER_ARGS_LEN}-byte order args, got ${args.length}`);
+export function randomNonce() {
+  const bytes = new Uint8Array(32);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256);
   }
-  return ccc.Script.from({ codeHash: dexScript.codeHash, hashType: dexScript.hashType, args: ccc.hexFrom(args) });
+  if (bytes.every((b) => b === 0)) bytes[0] = 1;
+  return ccc.hexFrom(bytes);
+}
+
+export function buildDexLock({
+  side,
+  makerLockHash,
+  xudtTypeHash,
+  tokenAmount,
+  price,
+  pricePerToken,
+  nonce = randomNonce(),
+}) {
+  const isBuy = side === SIDE_BUY || side === "BUY" || side === 0;
+  const unitPrice =
+    pricePerToken ?? (tokenAmount > 0n ? BigInt(price) / BigInt(tokenAmount) : BigInt(price));
+  const remainingOffer = isBuy ? BigInt(price) : BigInt(tokenAmount);
+  const worstRate = BigInt(Math.max(marketInfo?.config?.makerBps ?? 10, marketInfo?.config?.takerBps ?? 20));
+  const feeReserve = isBuy ? ceilDiv(remainingOffer * worstRate, BPS) : 0n;
+  const lotSize = BigInt(marketInfo?.config?.lotSize ?? 1);
+
+  const orderArgsHex = encodeDexV2Order({
+    side: isBuy ? "BUY" : "SELL",
+    kind: "LIMIT",
+    owner: makerLockHash,
+    market: marketHash,
+    nonce,
+    priceNum: unitPrice,
+    priceDen: BigInt(marketInfo?.config?.tickDen ?? 1),
+    initialBase: BigInt(tokenAmount),
+    remainingBase: BigInt(tokenAmount),
+    remainingOffer,
+    feeReserve,
+    costBudget: DEFAULT_COST_BUDGET,
+    maxNetworkFee: DEFAULT_MAX_NETWORK_FEE,
+    maxRefundFee: DEFAULT_MAX_REFUND_FEE,
+    refundAfter: 0n,
+    minFill: lotSize <= BigInt(tokenAmount) ? lotSize : 1n,
+  });
+
+  return ccc.Script.from({
+    codeHash: dexScript.codeHash,
+    hashType: dexScript.hashType,
+    args: orderArgsHex,
+  });
+}
+
+/** Minimum occupied capacity of the buy order cell. */
+export function buyOrderCellOccupiedCapacity(makerLock) {
+  const dummyDexLock = buildDexLock({
+    side: SIDE_BUY,
+    makerLockHash: makerLock ? makerLock.hash() : "0x" + "11".repeat(32),
+    tokenAmount: 1n,
+    price: 1n,
+  });
+  const scratch = ccc.Transaction.from({
+    outputs: [{ lock: dummyDexLock }],
+    outputsData: ["0x"],
+  });
+  return scratch.outputs[0].capacity;
 }
 
 /** Capacity of the token cell a buyer receives on settlement (its minimum occupied size). */
@@ -52,21 +122,26 @@ export function settlementTokenCellCapacity(makerLock, token, tokenAmount) {
 }
 
 /**
- * CKB a buy order locks up: the price, the token cell it will receive, and the
- * settlement fee reserve. Whatever the fee doesn't use comes back in the token cell.
+ * CKB a buy order locks up:
+ * On-chain V2 escrow requires: cap >= occupied + cost_budget + remaining_offer + fee_reserve.
  */
 export function buyOrderCapacity(makerLock, token, tokenAmount, totalPrice) {
-  return totalPrice + settlementTokenCellCapacity(makerLock, token, tokenAmount) + SETTLEMENT_FEE_RESERVE;
+  const occupied = buyOrderCellOccupiedCapacity(makerLock);
+  const worstRate = BigInt(Math.max(marketInfo?.config?.makerBps ?? 10, marketInfo?.config?.takerBps ?? 20));
+  const feeReserve = ceilDiv(BigInt(totalPrice) * worstRate, BPS);
+  return occupied + DEFAULT_COST_BUDGET + BigInt(totalPrice) + feeReserve;
 }
 
 /**
  * Rough network fee for an order tx before it's built (shannons): about 1 KB
- * at the 1,000 shannons/KB rate used here. Shown as an estimate until the
- * exact fee is known.
+ * at the 1,000 shannons/KB rate used here.
  */
 export const ESTIMATED_ORDER_FEE = 1_000n;
 
-/** CKB deposit a sell order's cell holds (its minimum occupied size), computed locally. */
+/**
+ * CKB deposit a sell order's cell holds:
+ * On-chain V2 escrow requires: cap >= occupied + cost_budget.
+ */
 export function sellOrderDeposit(makerLock, token, tokenAmount, totalPrice) {
   const dexLock = buildDexLock({
     side: SIDE_SELL,
@@ -79,7 +154,7 @@ export function sellOrderDeposit(makerLock, token, tokenAmount, totalPrice) {
     outputs: [{ lock: dexLock, type: token.type }],
     outputsData: [ccc.numLeToBytes(tokenAmount, 16)],
   });
-  return scratch.outputs[0].capacity;
+  return scratch.outputs[0].capacity + DEFAULT_COST_BUDGET;
 }
 
 /** A "plain" cell is what the wallet's CKB balance counts: no type script, no data. */
@@ -87,9 +162,7 @@ const isPlain = (output, data) => !output.type && ccc.bytesFrom(data ?? "0x").le
 
 /**
  * How `tx` changes the wallet's balances as the UI shows them: `ckb` is the
- * change in plain CKB (shannons), `token` the change in token units. CKB that
- * moves into an order cell or a token cell leaves the plain balance even
- * though it still belongs to the user.
+ * change in plain CKB (shannons), `token` the change in token units.
  */
 export async function walletDelta(tx, client, lock, token) {
   const lockHash = lock.hash();
@@ -124,11 +197,12 @@ export async function buildCreateOrderTx({ signer, client, token, side, tokenAmo
   });
 
   if (side === SIDE_SELL) {
-    // The order cell carries exactly tokenAmount of the token.
+    const deposit = sellOrderDeposit(makerLock, token, tokenAmount, totalPrice);
     const tx = ccc.Transaction.from({
-      outputs: [{ lock: dexLock, type: token.type }],
+      outputs: [{ lock: dexLock, type: token.type, capacity: deposit }],
       outputsData: [ccc.numLeToBytes(tokenAmount, 16)],
     });
+    tx.addCellDeps(dexScript.cellDeps);
     tx.addCellDeps(xudtCellDeps);
     await tx.completeInputsByUdt(signer, token.type);
 
@@ -144,11 +218,12 @@ export async function buildCreateOrderTx({ signer, client, token, side, tokenAmo
     return tx;
   }
 
-  // BUY: a plain CKB cell pre-funded for the payment and the incoming token cell.
+  // BUY: a plain CKB cell pre-funded for the payment, cost budget, occupied capacity, and fee reserve.
   const tx = ccc.Transaction.from({
     outputs: [{ lock: dexLock, capacity: buyOrderCapacity(makerLock, token, tokenAmount, totalPrice) }],
     outputsData: ["0x"],
   });
+  tx.addCellDeps(dexScript.cellDeps);
   await tx.completeInputsByCapacity(signer);
   await tx.completeFeeBy(signer, FEE_RATE);
   return tx;
@@ -156,8 +231,7 @@ export async function buildCreateOrderTx({ signer, client, token, side, tokenAmo
 
 /**
  * Reads one of our own just-placed orders straight from the chain, so it can
- * be cancelled before the backend lists it (the backend waits for several
- * confirmations). Returns the same shape as a backend order document.
+ * be cancelled before the backend lists it.
  */
 export async function readOwnOrderCell({ client, makerLock, txHash, index = 0 }) {
   const outPoint = { txHash, index: String(index) };
@@ -171,39 +245,50 @@ export async function readOwnOrderCell({ client, makerLock, txHash, index = 0 })
   }
   const { lock, type, capacity } = cell.cellOutput;
   const args = ccc.bytesFrom(lock.args);
-  const isOurOrder =
-    lock.codeHash === dexScript.codeHash &&
-    lock.hashType === dexScript.hashType &&
-    args.length === ORDER_ARGS_LEN &&
-    ccc.hexFrom(args.slice(2, 34)) === makerLock.hash();
+
+  let direction = "BID";
+  let isOurOrder = false;
+
+  if (args.length === ORDER_ARGS_LEN_V2) {
+    const v2 = decodeDexV2Order(args);
+    isOurOrder =
+      lock.codeHash === dexScript.codeHash &&
+      lock.hashType === dexScript.hashType &&
+      v2.owner.toLowerCase() === makerLock.hash().toLowerCase();
+    direction = v2.side === "BUY" ? "BID" : "ASK";
+  } else if (args.length === ORDER_ARGS_LEN_V1) {
+    isOurOrder =
+      (lock.codeHash === dexScript.codeHash || lock.codeHash === deployment.knownScripts?.DexOrderLockV1?.codeHash) &&
+      ccc.hexFrom(args.slice(2, 34)).toLowerCase() === makerLock.hash().toLowerCase();
+    direction = args[1] === SIDE_SELL ? "ASK" : "BID";
+  }
+
   if (!isOurOrder) throw new Error("That cell isn't one of your DEX orders");
 
   return {
     outPoint,
-    direction: args[1] === SIDE_SELL ? "ASK" : "BID",
+    direction,
     capacity: capacity.toString(),
     ownerLock: makerLock,
     typeScript: type ?? undefined,
     cellData: cell.outputData,
+    orderVersion: args.length === ORDER_ARGS_LEN_V2 ? 2 : 1,
   };
 }
 
 /**
- * Spends a live order cell back to its maker. The lock has no signature check
- * of its own: it allows the spend when another input carries the maker's lock
- * (program_entry in main.rs), so we make sure one is present. The contract
- * requires the refund to keep the order's type, data and at least its full
- * capacity; the fee comes from that separate maker input (validate_cancellation).
+ * Spends a live order cell back to its maker (cancellation).
  */
 export async function buildCancelOrderTx({ signer, client, order }) {
   await verifyChain();
   const { script: makerLock } = await signer.getRecommendedAddressObj();
   const isSell = order.direction === "ASK";
 
-  const output = { capacity: BigInt(order.capacity), lock: order.ownerLock };
+  const ownerLock = ccc.Script.from(order.ownerLock ?? makerLock);
+  const output = { capacity: BigInt(order.capacity), lock: ownerLock };
   if (isSell) {
     if (!order.typeScript) throw new Error("Sell order is missing its token type script");
-    output.type = order.typeScript;
+    output.type = ccc.Script.from(order.typeScript);
   }
 
   const tx = ccc.Transaction.from({
@@ -213,6 +298,30 @@ export async function buildCancelOrderTx({ signer, client, order }) {
   });
   tx.addCellDeps(dexScript.cellDeps);
   if (isSell) tx.addCellDeps(xudtCellDeps);
+
+  // Check if order is V2 (args length 243)
+  let isV2 = order.orderVersion === 2;
+  if (!isV2) {
+    const rawArgs = order.lockScript?.args ?? order.dexLockArgs;
+    if (rawArgs && ccc.bytesFrom(rawArgs).length === ORDER_ARGS_LEN_V2) {
+      isV2 = true;
+    } else {
+      const liveCell = await client.getCell(order.outPoint);
+      if (liveCell && ccc.bytesFrom(liveCell.cellOutput.lock.args).length === ORDER_ARGS_LEN_V2) {
+        isV2 = true;
+      }
+    }
+  }
+
+  if (isV2) {
+    tx.setWitnessArgs(0, {
+      lock: encodeDexV2RefundWitness({
+        action: "CANCEL",
+        refundOutputIndex: 0,
+        refundFee: 0n,
+      }),
+    });
+  }
 
   const makerLockHash = makerLock.hash();
   let hasMakerInput = false;

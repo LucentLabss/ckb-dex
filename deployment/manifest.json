@@ -6,13 +6,13 @@
       "genesisHash": "0x10639e0895502b5688a6be8cf69460d76541bfa4821629d86d62ba0aae3f9606",
       "client": "testnet",
       "dex": {
-        "codeHash": "0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f",
+        "codeHash": "0x1a246a9a2a8e61ac5601a0e597a4e913144cdc31f182d90e9df0d39bbf49f177",
         "hashType": "data2",
         "cellDeps": [
           {
             "cellDep": {
               "outPoint": {
-                "txHash": "0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149",
+                "txHash": "0xa4adeb9bc4ea2439411d884bbbd272613f618cbb8479d9dbea653efe18f99f1b",
                 "index": 0
               },
               "depType": "code"
@@ -21,6 +21,36 @@
         ]
       },
       "knownScripts": {
+        "DexMarketConfig": {
+          "codeHash": "0x7fd9fac1412997339d005f4e9367f764b24658404967089ba93f42aa579d71fc",
+          "hashType": "data2",
+          "cellDeps": [
+            {
+              "cellDep": {
+                "outPoint": {
+                  "txHash": "0x4ea17006042298136a6109710492de4320e6ad47ee1b49ba93ca5bf2f414b684",
+                  "index": 0
+                },
+                "depType": "code"
+              }
+            }
+          ]
+        },
+        "DexOrderLockV1": {
+          "codeHash": "0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f",
+          "hashType": "data2",
+          "cellDeps": [
+            {
+              "cellDep": {
+                "outPoint": {
+                  "txHash": "0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149",
+                  "index": 0
+                },
+                "depType": "code"
+              }
+            }
+          ]
+        },
         "Secp256k1Blake160": {
           "codeHash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
           "hashType": "type",
@@ -162,7 +192,37 @@
           "symbol": "TOKEN",
           "args": "0x81a4bc69515491beae44f47d21b1e4a11c289b6d69a27120cb913ab6955112e400000000"
         }
-      ]
+      ],
+      "market": {
+        "id": "TOKEN-CKB",
+        "marketHash": "0x41741cce1fc2b7e0021de7d97918433f8237fbfdae38c326ceb098fabc15f4c7",
+        "typeScript": {
+          "codeHash": "0x7fd9fac1412997339d005f4e9367f764b24658404967089ba93f42aa579d71fc",
+          "hashType": "data2",
+          "args": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        "cellDep": {
+          "outPoint": {
+            "txHash": "0x4ea17006042298136a6109710492de4320e6ad47ee1b49ba93ca5bf2f414b684",
+            "index": 0
+          },
+          "depType": "code"
+        },
+        "config": {
+          "admin": "0x81a4bc69515491beae44f47d21b1e4a11c289b6d69a27120cb913ab6955112e4",
+          "treasury": "0x81a4bc69515491beae44f47d21b1e4a11c289b6d69a27120cb913ab6955112e4",
+          "base": "0xe5883cb3408bf64ce730492283b784ac5cab18b90f26c30fa375594d6dac52c2",
+          "quote": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "makerBps": 10,
+          "takerBps": 20,
+          "lotSize": "1",
+          "minOrder": "1",
+          "maxOrder": "1000000000000",
+          "tickNum": "1",
+          "tickDen": "1",
+          "status": 0
+        }
+      }
     }
   }
 }
