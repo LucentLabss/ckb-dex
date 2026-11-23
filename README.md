@@ -122,7 +122,7 @@ and Invalid.
 
 | Path | Contents |
 | --- | --- |
-| `smart-contract/` | Rust CKB contracts (`dex-order-lock`, `lock-script-contract`) and tests |
+| `smart-contract/` | Legacy v1 DEX, v2 order/market contracts, shared Rust types, and tests |
 | `backend/` | Express + MongoDB API, matching bot, event ingestion, WebSocket broadcaster |
 | `ui/` | Vite + React 19 trading UI using CCC wallet connector |
 | `faucet/` | Express service that drips test xUDT with a per-claim cooldown |
@@ -180,14 +180,22 @@ a wrong chain, missing DEX/xUDT dependency cells, or mismatched script identitie
 Unconfigured networks are rejected; only testnet is currently listed.
 
 `scripts.json` and `system-scripts.json` remain deployment-tool artifacts, not
-runtime configuration. The manifest records the currently deployed contract:
+runtime configuration. The manifest selects the active v1 deployment:
 `dex-order-lock` uses code hash
 `0x2c1cb8086484295902243b8e81227a2b7a377895acf5e05a1ad0d62859497f6f`
 (`data2`), deployed in transaction
 `0xff891c876410636044dabe4bd7649eeefaa9fb46826b8f1b7667bdd037087149`
 (2026-11-02, includes the buyer-change and onchain refund/cancel checks).
 
-### Redeploying the contract
+V2 deployment records:
+
+- [Order lock](deployment/v2/order-lock/scripts.json)
+- [Market configuration script](deployment/v2/market-config/scripts.json)
+
+The generated TOML files use binary paths relative to the repository root.
+The application remains on v1 pending v2 integration.
+
+### Redeploying v1
 
 1. Build (`make build CONTRACT=dex-order-lock` in `smart-contract/`, or the
    reproducible Docker script) and deploy with your deployment tool. This writes
@@ -249,6 +257,13 @@ The backend needs MongoDB reachable at startup; its "demo mode" fallback does
 not work reliably yet.
 
 ## Smart contract development
+
+Orderbook v2 scripts are implemented separately in
+[`dex-order-lock-v2`](smart-contract/contracts/dex-order-lock-v2/README.md) and
+[`dex-market-config`](smart-contract/contracts/dex-market-config/README.md).
+They support multi-asset partial fills, bounded market orders, user-funded costs,
+and admin-controlled market settings. Each README documents the transaction
+format. The deployed application and its builders still use v1.
 
 Smart contract source, build instructions, and tests are in `smart-contract/`.
 The DEX lock's validation details and error codes are documented in

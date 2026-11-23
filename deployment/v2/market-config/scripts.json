@@ -1,0 +1,21 @@
+{
+  "devnet": {},
+  "testnet": {
+    "dex-market-config": {
+      "codeHash": "0x7fd9fac1412997339d005f4e9367f764b24658404967089ba93f42aa579d71fc",
+      "hashType": "data2",
+      "cellDeps": [
+        {
+          "cellDep": {
+            "outPoint": {
+              "txHash": "0x4ea17006042298136a6109710492de4320e6ad47ee1b49ba93ca5bf2f414b684",
+              "index": 0
+            },
+            "depType": "code"
+          }
+        }
+      ]
+    }
+  },
+  "mainnet": {}
+}
