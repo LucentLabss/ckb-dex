@@ -195,22 +195,22 @@
       ],
       "market": {
         "id": "TOKEN-CKB",
-        "marketHash": "0x41741cce1fc2b7e0021de7d97918433f8237fbfdae38c326ceb098fabc15f4c7",
+        "marketHash": "0x6716cd686b69e6edee492ea41923638d31997e735bd59a1410e478f0d606a75b",
         "typeScript": {
           "codeHash": "0x7fd9fac1412997339d005f4e9367f764b24658404967089ba93f42aa579d71fc",
           "hashType": "data2",
-          "args": "0x0000000000000000000000000000000000000000000000000000000000000001"
+          "args": "0xcbe88c471b8ce9f19bf6ace0aa7e7b2ecfa07414fd110580647a13feec62deec"
         },
         "cellDep": {
           "outPoint": {
-            "txHash": "0x4ea17006042298136a6109710492de4320e6ad47ee1b49ba93ca5bf2f414b684",
+            "txHash": "0xec206af509a1ed25413f2bc2f113126944c81ab57b574e90b0900f1f5603a505",
             "index": 0
           },
           "depType": "code"
         },
         "config": {
-          "admin": "0x81a4bc69515491beae44f47d21b1e4a11c289b6d69a27120cb913ab6955112e4",
-          "treasury": "0x81a4bc69515491beae44f47d21b1e4a11c289b6d69a27120cb913ab6955112e4",
+          "admin": "0x7dd3a475cb39ce368d01f2f891662e26de4c7c5ae4811ba3c4865141e3157c24",
+          "treasury": "0x7dd3a475cb39ce368d01f2f891662e26de4c7c5ae4811ba3c4865141e3157c24",
           "base": "0xe5883cb3408bf64ce730492283b784ac5cab18b90f26c30fa375594d6dac52c2",
           "quote": "0x0000000000000000000000000000000000000000000000000000000000000000",
           "makerBps": 10,
@@ -221,6 +221,16 @@
           "tickNum": "1",
           "tickDen": "1",
           "status": 0
+        },
+        "adminLockScript": {
+          "codeHash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          "hashType": "type",
+          "args": "0x54c46ed43f2b07d6904607366a6b22b2b35f8a46"
+        },
+        "treasuryLockScript": {
+          "codeHash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          "hashType": "type",
+          "args": "0x54c46ed43f2b07d6904607366a6b22b2b35f8a46"
         }
       }
     }
