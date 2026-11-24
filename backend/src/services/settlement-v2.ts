@@ -30,6 +30,7 @@ export interface BuildSettlementParams {
   orders: SettlementInputOrder[];
   takerIndex: number;
   market: DexV2MarketConfig;
+  treasuryLock: ccc.ScriptLike;
   dexOrderLockCellDep: ccc.CellDepLike;
   marketConfigCellDep: ccc.CellDepLike;
   xudtCellDeps: ccc.CellDepLike[];
@@ -51,6 +52,10 @@ const DEFAULT_FEE_SHARE = 100_000n; // 0.001 CKB default network fee share per o
  */
 export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlement {
   const { orders, takerIndex, market } = params;
+  const treasuryLock = ccc.Script.from(params.treasuryLock);
+  if (treasuryLock.hash() !== market.treasury) {
+    throw new AppError(400, "Treasury lock script does not match the market configuration");
+  }
   const n = orders.length;
 
   if (n < 2) {
@@ -97,7 +102,14 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
   // Treasury storage calculation
   // For native CKB: top-up is max(0, occupied - fees)
   // For UDT: top-up is minimum cell capacity
-  const treasuryOccupied = MIN_CELL_CAPACITY;
+  const treasuryType = isQuoteNative ? undefined : orders
+    .map((order) => order.typeScript)
+    .find((type) => type && ccc.Script.from(type).hash() === market.quote);
+  if (!isQuoteNative && totalFees > 0n && !treasuryType) {
+    throw new AppError(400, "Missing quote asset type script for treasury payment");
+  }
+  const treasuryData = isQuoteNative ? "0x" : ccc.hexFrom(ccc.numLeToBytes(totalFees, 16));
+  const treasuryOccupied = ccc.CellOutput.from({ lock: treasuryLock, type: treasuryType }, treasuryData).capacity;
   const nativeFees = isQuoteNative ? totalFees : 0n;
   const treasuryStorageTopUp = totalFees > 0n
     ? (treasuryOccupied > nativeFees ? treasuryOccupied - nativeFees : 0n)
@@ -264,12 +276,8 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
   if (totalFees > 0n) {
     if (isQuoteNative) {
       treasuryOutputIndex = addOutput(
-        {
-          codeHash: market.treasury,
-          hashType: "type",
-          args: "0x",
-        },
-        treasuryOccupied + totalFees,
+        treasuryLock,
+        treasuryStorageTopUp + totalFees,
         undefined,
         "0x",
       );
@@ -279,13 +287,9 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
       feeData.writeBigUInt64LE((totalFees >> 64n) & 0xffff_ffff_ffff_ffffn, 8);
 
       treasuryOutputIndex = addOutput(
-        {
-          codeHash: market.treasury,
-          hashType: "type",
-          args: "0x",
-        },
+        treasuryLock,
         treasuryOccupied,
-        orders[0].typeScript,
+        treasuryType,
         toHex(feeData),
       );
     }

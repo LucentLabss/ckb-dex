@@ -7,6 +7,20 @@ export interface CellDep {
   depType: "code" | "depGroup";
 }
 export interface DeploymentScript extends ScriptIdentity { cellDeps: { cellDep: CellDep }[]; }
+export interface DeploymentMarket {
+  id: string;
+  marketHash: Hex;
+  typeScript: AssetType;
+  cellDep: CellDep;
+  config: {
+    admin: Hex; treasury: Hex; base: Hex; quote: Hex;
+    makerBps: number; takerBps: number;
+    lotSize: string; minOrder: string; maxOrder: string;
+    tickNum: string; tickDen: string; status: number;
+  };
+  adminLockScript?: AssetType;
+  treasuryLockScript?: AssetType;
+}
 export interface Deployment {
   network: "devnet" | "testnet" | "mainnet";
   genesisHash: Hex;
@@ -14,8 +28,10 @@ export interface Deployment {
   dex: DeploymentScript;
   knownScripts: Record<string, DeploymentScript>;
   assets: { id: string; symbol: string; args: Hex }[];
+  market?: DeploymentMarket;
 }
 export function getDeployment(network: string): Deployment;
+export function getMarket(deployment: Deployment): DeploymentMarket | undefined;
 export function getAssetType(deployment: Deployment, id?: string): AssetType;
 export function assertDexConfiguration(deployment: Deployment, configured: AssetType): void;
 export function assertSupportedAsset(

@@ -18,6 +18,7 @@ const DUMMY_HASH_2 = ("0x" + "22".repeat(32)) as Hex;
 const DUMMY_HASH_3 = ("0x" + "33".repeat(32)) as Hex;
 const DUMMY_HASH_4 = ("0x" + "44".repeat(32)) as Hex;
 const MARKET_CONFIG_HASH = ("0x" + "77".repeat(32)) as Hex;
+const treasuryLock = ccc.Script.from({ codeHash: DUMMY_HASH_2, hashType: "type", args: "0x02" });
 
 const dummyLockScript: Script = {
   codeHash: ("0x" + "aa".repeat(32)) as Hex,
@@ -27,7 +28,7 @@ const dummyLockScript: Script = {
 
 const mockMarketConfig: DexV2MarketConfig = {
   admin: DUMMY_HASH_1,
-  treasury: DUMMY_HASH_2,
+  treasury: treasuryLock.hash(),
   base: DUMMY_HASH_3,
   quote: "0x" + "00".repeat(32) as Hex, // native CKB
   makerBps: 10,
@@ -305,6 +306,7 @@ test("executeV2Trade builds and submits a V2 settlement transaction", async () =
   const bot = bareBot({
     dexCellDeps: [dexCellDep],
     xudtCellDeps: [xudtCellDep],
+    resolveMarketConfig: async () => ({ config: mockMarketConfig, cellDep: marketConfigCellDep, treasuryLock }),
     reserve: async (id: string) => (id === "buy-v2" ? buyDoc : sellDoc),
     checkOrderLiveness: async () => true,
     submit: async (tx: ccc.Transaction) => {
@@ -316,8 +318,6 @@ test("executeV2Trade builds and submits a V2 settlement transaction", async () =
     },
   });
 
-  bot.registerMarketConfig(MARKET_CONFIG_HASH, mockMarketConfig, marketConfigCellDep);
-
   const txHash = await bot.executeTrade(buyDoc, sellDoc);
   assert.equal(txHash, "0x" + "ff".repeat(32));
   assert.equal(submittedTxs.length, 1);
@@ -328,4 +328,5 @@ test("executeV2Trade builds and submits a V2 settlement transaction", async () =
   assert.ok(tx.outputs.length >= 3);
   // Cell deps include dexCellDep, marketConfigCellDep, and xudtCellDeps
   assert.ok(tx.cellDeps.length >= 3);
+  assert.ok(tx.outputs.some((output) => output.lock.hash() === mockMarketConfig.treasury));
 });

@@ -14,10 +14,11 @@ const DUMMY_HASH_1 = "0x11111111111111111111111111111111111111111111111111111111
 const DUMMY_HASH_2 = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const DUMMY_HASH_3 = "0x3333333333333333333333333333333333333333333333333333333333333333";
 const DUMMY_HASH_4 = "0x4444444444444444444444444444444444444444444444444444444444444444";
+const treasuryLock = ccc.Script.from({ codeHash: DUMMY_HASH_2, hashType: "type", args: `0x${"22".repeat(20)}` });
 
 const mockMarket: DexV2MarketConfig = {
   admin: DUMMY_HASH_1,
-  treasury: DUMMY_HASH_2,
+  treasury: treasuryLock.hash(),
   base: DUMMY_HASH_3,
   quote: NATIVE_ASSET_HASH,
   makerBps: 10,
@@ -38,7 +39,7 @@ const dummyCellDep: ccc.CellDepLike = {
   depType: "code",
 };
 
-test("buildV2Settlement builds a valid 2-order full fill settlement transaction with witness and treasury", () => {
+test("buildV2Settlement builds 2-order full fill outputs with witness and treasury", () => {
   const buyOrder: DexV2Order = {
     side: "BUY",
     kind: "LIMIT",
@@ -98,6 +99,7 @@ test("buildV2Settlement builds a valid 2-order full fill settlement transaction 
     orders,
     takerIndex: 0,
     market: mockMarket,
+    treasuryLock,
     dexOrderLockCellDep: dummyCellDep,
     marketConfigCellDep: dummyCellDep,
     xudtCellDeps: [dummyCellDep],
@@ -124,6 +126,8 @@ test("buildV2Settlement builds a valid 2-order full fill settlement transaction 
   // Treasury fees: taker 20 bps = 50, maker 10 bps = 25 -> total 75
   assert.equal(result.totalFees, 75n);
   assert.notEqual(result.treasuryOutputIndex, 0xffffffff);
+  assert.equal(result.tx.outputs[result.treasuryOutputIndex].lock.hash(), mockMarket.treasury);
+  assert.equal(result.tx.outputs[result.treasuryOutputIndex].lock.args, treasuryLock.args);
 });
 
 test("buildV2Settlement handles partial fill and creates successor cell", () => {
@@ -186,6 +190,7 @@ test("buildV2Settlement handles partial fill and creates successor cell", () => 
     orders,
     takerIndex: 0,
     market: mockMarket,
+    treasuryLock,
     dexOrderLockCellDep: dummyCellDep,
     marketConfigCellDep: dummyCellDep,
     xudtCellDeps: [dummyCellDep],
@@ -197,4 +202,121 @@ test("buildV2Settlement handles partial fill and creates successor cell", () => 
   assert.notEqual(result.fills[0].successor, 0xffffffff);
   // Sell fully filled -> no successor
   assert.equal(result.fills[1].successor, 0xffffffff);
+});
+
+function treasuryFixture(lock: ccc.ScriptLike = treasuryLock, priceNum = 50n) {
+  const baseType = ccc.Script.from({ codeHash: DUMMY_HASH_3, hashType: "type", args: "0x03" });
+  const common = {
+    kind: "LIMIT" as const,
+    market: DUMMY_HASH_2,
+    nonce: DUMMY_HASH_3,
+    priceNum,
+    priceDen: 1n,
+    initialBase: 500n,
+    remainingBase: 500n,
+    costBudget: 500n * 100_000_000n,
+    maxNetworkFee: 10_000_000n,
+    maxRefundFee: 5_000_000n,
+    refundAfter: 1_800_000_000n,
+    minFill: 100n,
+  } as const;
+  const buy: DexV2Order = {
+    ...common, side: "BUY", owner: DUMMY_HASH_1,
+    remainingOffer: 500n * priceNum, feeReserve: priceNum,
+  };
+  const sell: DexV2Order = {
+    ...common, side: "SELL", owner: DUMMY_HASH_4,
+    remainingOffer: 500n, feeReserve: 0n,
+  };
+  const orders: SettlementInputOrder[] = [
+    {
+      order: buy, outPoint: { txHash: DUMMY_HASH_1, index: 0 },
+      cellCapacity: buy.remainingOffer + buy.feeReserve + 1000n * 100_000_000n,
+      ownerLock: { codeHash: DUMMY_HASH_1, hashType: "type", args: "0x01" }, cellData: "0x",
+    },
+    {
+      order: sell, outPoint: { txHash: DUMMY_HASH_4, index: 0 },
+      cellCapacity: 1000n * 100_000_000n,
+      ownerLock: { codeHash: DUMMY_HASH_4, hashType: "type", args: "0x04" },
+      typeScript: baseType, cellData: ccc.hexFrom(ccc.numLeToBytes(500n, 16)),
+    },
+  ];
+  return {
+    orders, takerIndex: 0,
+    market: { ...mockMarket, base: baseType.hash(), treasury: ccc.Script.from(lock).hash() },
+    treasuryLock: lock,
+    dexOrderLockCellDep: dummyCellDep,
+    marketConfigCellDep: dummyCellDep,
+    xudtCellDeps: [dummyCellDep],
+  };
+}
+
+test("treasury payment uses the full supplied script and funds only its required storage", () => {
+  const params = treasuryFixture();
+  const result = buildV2Settlement(params);
+  const output = result.tx.outputs[result.treasuryOutputIndex];
+  const occupied = ccc.CellOutput.from({ lock: treasuryLock }, "0x").capacity;
+  assert.equal(output.lock.hash(), params.market.treasury);
+  assert.equal(output.lock.codeHash, treasuryLock.codeHash);
+  assert.equal(output.lock.args, treasuryLock.args);
+  assert.equal(output.capacity, occupied);
+  assert.equal(result.tx.outputsData[result.treasuryOutputIndex], "0x");
+  assert.equal(result.fills.reduce((sum, fill) => sum + fill.treasuryCapacity, 0n), occupied - result.totalFees);
+});
+
+test("a different treasury script is rejected even if its code hash matches", () => {
+  const params = treasuryFixture();
+  params.treasuryLock = { codeHash: treasuryLock.codeHash, hashType: treasuryLock.hashType, args: "0x" };
+  assert.throws(() => buildV2Settlement(params), /Treasury lock script does not match/);
+});
+
+test("native trading fees that cover treasury storage do not charge another storage reserve", () => {
+  const params = treasuryFixture(treasuryLock, 200n * 100_000_000n);
+  const result = buildV2Settlement(params);
+  assert.ok(result.totalFees > ccc.CellOutput.from({ lock: treasuryLock }, "0x").capacity);
+  assert.equal(result.tx.outputs[result.treasuryOutputIndex].capacity, result.totalFees);
+  assert.ok(result.fills.every((fill) => fill.treasuryCapacity === 0n));
+});
+
+test("treasury occupied capacity is calculated from the actual lock script", () => {
+  const largerLock = ccc.Script.from({ codeHash: treasuryLock.codeHash, hashType: treasuryLock.hashType, args: "0x" + "11".repeat(40) });
+  const result = buildV2Settlement(treasuryFixture(largerLock));
+  const occupied = ccc.CellOutput.from({ lock: largerLock }, "0x").capacity;
+  assert.ok(occupied > ccc.CellOutput.from({ lock: treasuryLock }, "0x").capacity);
+  assert.equal(result.tx.outputs[result.treasuryOutputIndex].capacity, occupied);
+  assert.equal(result.fills.reduce((sum, fill) => sum + fill.treasuryCapacity, 0n), occupied - result.totalFees);
+});
+
+test("token treasury fees use the quote token type and include token-cell storage", () => {
+  const params = treasuryFixture();
+  const quoteType = ccc.Script.from({ codeHash: DUMMY_HASH_4, hashType: "type", args: "0x1234" });
+  params.market.quote = quoteType.hash();
+  params.orders[0].typeScript = quoteType;
+  params.orders.reverse(); // The first input now holds base tokens, not quote tokens.
+  const result = buildV2Settlement(params);
+  const index = result.treasuryOutputIndex;
+  const output = result.tx.outputs[index];
+  const data = ccc.hexFrom(ccc.numLeToBytes(result.totalFees, 16));
+  const occupied = ccc.CellOutput.from({ lock: treasuryLock, type: quoteType }, data).capacity;
+  assert.equal(output.lock.hash(), params.market.treasury);
+  assert.equal(output.type?.hash(), quoteType.hash());
+  assert.equal(result.tx.outputsData[index], data);
+  assert.equal(output.capacity, occupied);
+  assert.equal(result.fills.reduce((sum, fill) => sum + fill.treasuryCapacity, 0n), occupied);
+});
+
+test("token treasury fees reject a missing quote type rather than using an unrelated token", () => {
+  const params = treasuryFixture();
+  params.market.quote = DUMMY_HASH_4;
+  assert.throws(() => buildV2Settlement(params), /Missing quote asset type script/);
+});
+
+test("zero trading fees do not create or charge for a treasury output", () => {
+  const params = treasuryFixture();
+  params.market.makerBps = 0;
+  params.market.takerBps = 0;
+  const result = buildV2Settlement(params);
+  assert.equal(result.totalFees, 0n);
+  assert.equal(result.treasuryOutputIndex, 0xffffffff);
+  assert.ok(result.fills.every((fill) => fill.treasuryCapacity === 0n));
 });

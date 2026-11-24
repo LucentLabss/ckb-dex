@@ -90,40 +90,53 @@ export default class DexOrderBot implements DexOrderBotTrait {
       ccc.Script.from(getAssetType(deployment, asset.id)).hash()));
   }
 
-  private _marketConfigs: Map<string, { config: DexV2MarketConfig; cellDep: ccc.CellDepLike }> | undefined;
+  async resolveMarketConfig(marketHash: Hex): Promise<{
+    config: DexV2MarketConfig;
+    cellDep: ccc.CellDepLike;
+    treasuryLock: ccc.Script;
+  } | undefined> {
+    const deployment = getDeployment(this.config.ckbNetwork);
+    const market = deployment.market;
+    if (!market || market.marketHash.toLowerCase() !== marketHash.toLowerCase()) return undefined;
 
-  private get marketConfigs(): Map<string, { config: DexV2MarketConfig; cellDep: ccc.CellDepLike }> {
-    return (this._marketConfigs ??= new Map());
-  }
+    const type = ccc.Script.from(market.typeScript);
+    const code = deployment.knownScripts.DexMarketConfig;
+    if (type.hash() !== marketHash.toLowerCase() || type.hashType !== "data2"
+        || type.codeHash !== code?.codeHash || type.hashType !== code.hashType) {
+      throw new AppError(500, "Market type script conflicts with the deployment manifest");
+    }
+    if (!market.treasuryLockScript) {
+      throw new AppError(500, "Missing treasury lock script in the deployment manifest");
+    }
+    const treasuryLock = ccc.Script.from(market.treasuryLockScript);
 
-  registerMarketConfig(marketHash: string, config: DexV2MarketConfig, cellDep: ccc.CellDepLike): void {
-    this.marketConfigs.set(marketHash.toLowerCase(), { config, cellDep });
-  }
-
-  async resolveMarketConfig(marketHash: Hex): Promise<{ config: DexV2MarketConfig; cellDep: ccc.CellDepLike } | undefined> {
-    const cached = this.marketConfigs.get(marketHash.toLowerCase());
-    if (cached) return cached;
-
-    try {
-      for await (const cell of this.client.findCells({
-        script: { codeHash: marketHash, hashType: "type", args: "0x" },
-        scriptType: "type",
-        scriptSearchMode: "prefix",
-        withData: true,
-      })) {
-        if (cell.cellOutput.type?.hash() === marketHash) {
-          const decoded = decodeDexV2MarketConfig(cell.outputData);
-          const cellDep: ccc.CellDepLike = {
-            outPoint: cell.outPoint,
-            depType: "code",
-          };
-          const resolved = { config: decoded, cellDep };
-          this.marketConfigs.set(marketHash.toLowerCase(), resolved);
-          return resolved;
-        }
+    const resolveLive = async (outPoint: ccc.OutPointLike) => {
+      const live = await this.client.getCellLive(outPoint, true);
+      if (!live) return undefined;
+      if (live.cellOutput.type?.hash() !== type.hash()) {
+        throw new AppError(400, "Market configuration cell has the wrong type script");
       }
-    } catch {
-      // Indexer fallback or cell search failed
+      const config = decodeDexV2MarketConfig(live.outputData);
+      if (live.cellOutput.lock.hash() !== config.admin) {
+        throw new AppError(400, "Market configuration cell has the wrong admin lock");
+      }
+      if (treasuryLock.hash() !== config.treasury) {
+        throw new AppError(400, "Treasury lock script does not match the live market configuration; update the manifest");
+      }
+      return { config, cellDep: { outPoint, depType: "code" as const }, treasuryLock };
+    };
+
+    // The manifest outpoint is a hint: an admin update spends it but preserves the type script.
+    const current = await resolveLive(market.cellDep.outPoint);
+    if (current) return current;
+    for await (const cell of this.client.findCellsOnChain({
+      script: type,
+      scriptType: "type",
+      scriptSearchMode: "exact",
+      withData: true,
+    })) {
+      const resolved = await resolveLive(cell.outPoint);
+      if (resolved) return resolved;
     }
     return undefined;
   }
@@ -545,6 +558,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       orders: inputOrders,
       takerIndex,
       market: marketInfo.config,
+      treasuryLock: marketInfo.treasuryLock,
       dexOrderLockCellDep: this.dexCellDeps[0],
       marketConfigCellDep: marketInfo.cellDep,
       xudtCellDeps: this.xudtCellDeps,
