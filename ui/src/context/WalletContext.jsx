@@ -8,7 +8,7 @@ import { getMarketToken, getTokenBalance } from "../services/ckb/token.js";
 const WalletContext = createContext(null);
 
 const PRIMARY_WALLET = "JoyID Passkey";
-const BALANCE_REFRESH_MS = 20_000;
+const BALANCE_REFRESH_MS = 30_000;
 const RECOMMENDED_SUFFIX = " · Recommended";
 
 /** CCC's default wallet list with JoyID pinned first and labelled as recommended. */
@@ -163,9 +163,25 @@ function WalletState({ children }) {
   // periodically (skipped while our own txs are pending, to avoid double counting).
   useEffect(() => {
     if (!signer || pendingTxs.size) return;
-    const id = setInterval(refreshBalances, BALANCE_REFRESH_MS);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshBalances();
+      }
+    }, BALANCE_REFRESH_MS);
     return () => clearInterval(id);
   }, [signer, pendingTxs.size, refreshBalances]);
+
+  // Catch up on balances as soon as the tab becomes visible again
+  useEffect(() => {
+    if (!signer) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshBalances();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [signer, refreshBalances]);
 
   const shownBalances = useMemo(() => {
     let ckb = balance;

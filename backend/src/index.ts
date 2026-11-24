@@ -12,7 +12,7 @@ export let config: Config | undefined = undefined;
 (async function main() {
   config = await new AppConfiguration().getEnvironment();
   registerChainVerification(createChainVerification(config));
-  const dexOrderBot = new DexOrderBot(config);
+  const dexOrderBot = new DexOrderBot(config, config.botPollInterval);
   await dexOrderBot.init();
   const databaseConnection = new Database(config.mongodbUrl);
 

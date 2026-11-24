@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ccc } from "@ckb-ccc/connector-react";
 import { useWallet } from "./WalletContext.jsx";
 import { useToast } from "./ToastContext.jsx";
-import { marketApi, subscribe } from "../services/api/index.js";
+import { marketApi, subscribe, isRealtimeConnected } from "../services/api/index.js";
 import { toOrderRow } from "../utils/orders.js";
 import { usePendingOrders } from "../hooks/usePendingOrders.js";
 import { useClosedOrdersVersion } from "../hooks/useClosedOrders.js";
@@ -12,10 +12,10 @@ const MarketContext = createContext(null);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TRADE_HISTORY = 200;
-const PENDING_POLL_MS = 10_000;
+const PENDING_POLL_MS = 30_000;
 /** Backend statuses for an order the bot has paired and is settling. */
 const IN_FLIGHT = ["RESERVED", "PENDING", "SETTLEMENT_SUBMITTED"];
-const HELD_RECHECK_MS = 15_000;
+const HELD_RECHECK_MS = 30_000;
 const HELD_MAX_AGE_MS = 30 * 60 * 1000;
 
 /** CKB per whole token for a confirmed trade (`price` is the flat total in shannons). */
@@ -212,6 +212,7 @@ export function MarketProvider({ children }) {
   useEffect(() => {
     if (!held.size) return;
     const id = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       for (const [key, entry] of held) {
         if (Date.now() - entry.since > HELD_MAX_AGE_MS) dropHeld(key);
         else checkHeld(key, entry.doc);
@@ -224,6 +225,8 @@ export function MarketProvider({ children }) {
   useEffect(() => {
     if (!token || !pending.length) return;
     const id = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (isRealtimeConnected()) return;
       marketApi
         .getOrderBook({ xudtTypeHash: token.typeHash, limit: 200 })
         .then(applyBook)

@@ -26,7 +26,8 @@ export interface Config {
   /** Blocks a transaction must be buried under before its events may change the projection. */
   confirmationDepth: number,
   port: number,
-  apiVersion: number
+  apiVersion: number,
+  botPollInterval?: number,
 }
 
 export interface AppConfig {

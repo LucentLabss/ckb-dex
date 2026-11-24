@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWallet } from "../context/WalletContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
-import { marketApi, subscribe } from "../services/api/index.js";
+import { marketApi, subscribe, isRealtimeConnected } from "../services/api/index.js";
 import { buildCancelOrderTx, buildCreateOrderTx, readOwnOrderCell, walletDelta } from "../services/ckb/dex.js";
 import { addPending, removePending } from "../services/pendingOrders.js";
 import { usePendingOrders } from "./usePendingOrders.js";
@@ -11,9 +11,9 @@ import { OPEN_STATUSES, pendingOrderRow, toOrderRow } from "../utils/orders.js";
 import { logAction } from "../utils/errors.js";
 import { fmtNum } from "../utils/format.js";
 
-const PENDING_POLL_MS = 10_000;
+const PENDING_POLL_MS = 30_000;
 /** Fallback refresh while we have open orders, in case realtime silently dropped (common on mobile). */
-const OPEN_POLL_MS = 15_000;
+const OPEN_POLL_MS = 30_000;
 /** Background builds kept for the confirmation sheet (most recent last). */
 const MAX_PREBUILDS = 4;
 
@@ -81,7 +81,11 @@ export function useOrders() {
   // Until the backend picks up our submitted orders, poll in case realtime is down.
   useEffect(() => {
     if (!pending.length) return;
-    const id = setInterval(() => load(), PENDING_POLL_MS);
+    const id = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (isRealtimeConnected()) return;
+      load();
+    }, PENDING_POLL_MS);
     return () => clearInterval(id);
   }, [pending.length, load]);
 
@@ -91,7 +95,9 @@ export function useOrders() {
   useEffect(() => {
     if (!hasOpen) return;
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") load();
+      if (document.visibilityState !== "visible") return;
+      if (isRealtimeConnected()) return;
+      load();
     }, OPEN_POLL_MS);
     return () => clearInterval(id);
   }, [hasOpen, load]);

@@ -17,6 +17,7 @@ const DEFAULT_CONFIG = {
     enviroment: "development" as const,
     dexScriptHashType: "type" as const,
     dexScriptArgs: "0x" as Hex,
+    botPollInterval: 15_000,
 };
 
 function requireEnv(name: string, value: string | undefined, fallback?: string): string {
@@ -147,6 +148,7 @@ export default class AppConfiguration implements AppConfig {
             internalBotToken: parseInternalBotToken(envs.INTERNAL_BOT_TOKEN),
             apiVersion: parseInteger("API_VERSION", envs.API_VERSION, DEFAULT_CONFIG.apiVersion),
             confirmationDepth: parseInteger("CONFIRMATION_DEPTH", envs.CONFIRMATION_DEPTH, DEFAULT_CONFIG.confirmationDepth),
+            botPollInterval: parseInteger("BOT_POLL_INTERVAL_MS", envs.BOT_POLL_INTERVAL_MS, DEFAULT_CONFIG.botPollInterval),
         };
 
         return this.config;

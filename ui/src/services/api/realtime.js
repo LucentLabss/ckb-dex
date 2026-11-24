@@ -21,6 +21,10 @@ let hiddenAt = null;
 /** Reconnect on return if the page was in the background at least this long. */
 const STALE_AFTER_HIDDEN_MS = 3_000;
 
+export function isRealtimeConnected() {
+  return socket?.readyState === WebSocket.OPEN;
+}
+
 function send(channels) {
   if (socket?.readyState === WebSocket.OPEN && channels.length) {
     socket.send(JSON.stringify({ channels }));

@@ -45,7 +45,7 @@ interface DexOrderBotTrait {
   retryFailSwaps(): Promise<void>;
 }
 
-const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_POLL_INTERVAL_MS = 15_000;
 /** Checkpoints kept, and how many are compared per tick when looking for the fork point. */
 const CHECKPOINT_RETENTION = 500;
 const CHECKPOINT_WINDOW = 50;
@@ -71,7 +71,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
   private ticking = false;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
 
-  constructor(config: Config, pollInterval: number = DEFAULT_POLL_INTERVAL_MS) {
+  constructor(config: Config, pollInterval: number = config.botPollInterval ?? DEFAULT_POLL_INTERVAL_MS) {
     this.config = config;
     this.pollInterval = pollInterval;
 
