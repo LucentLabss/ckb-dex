@@ -23,6 +23,7 @@ import {
   decodeDexV2MarketConfig,
   type DexV2Order,
   type DexV2MarketConfig,
+  NATIVE_ASSET_HASH,
 } from "../utils/dex-v2-codec.js";
 import { buildV2Settlement, type SettlementInputOrder } from "../services/settlement-v2.js";
 
@@ -529,6 +530,24 @@ export default class DexOrderBot implements DexOrderBotTrait {
     const buyV2 = this.toDexV2Order(buyOrder);
     const sellV2 = this.toDexV2Order(sellOrder);
 
+    const deployment = getDeployment(this.config.ckbNetwork ?? "testnet");
+    let baseType: ccc.Script | undefined;
+    if (marketInfo.config.base !== NATIVE_ASSET_HASH) {
+      if (sellOrder.typeScript) {
+        baseType = ccc.Script.from(sellOrder.typeScript);
+      } else if (buyOrder.typeScript) {
+        baseType = ccc.Script.from(buyOrder.typeScript);
+      } else if (deployment?.assets) {
+        for (const asset of deployment.assets) {
+          const script = ccc.Script.from(getAssetType(deployment, asset.id));
+          if (script.hash().toLowerCase() === marketInfo.config.base.toLowerCase()) {
+            baseType = script;
+            break;
+          }
+        }
+      }
+    }
+
     const inputOrders: SettlementInputOrder[] = [
       {
         order: buyV2,
@@ -538,6 +557,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
         },
         cellCapacity: BigInt(buyOrder.capacity),
         ownerLock: buyOrder.ownerLock as ccc.ScriptLike,
+        orderLock: buyOrder.lockScript as ccc.ScriptLike,
+        typeScript: buyOrder.typeScript ? (buyOrder.typeScript as ccc.ScriptLike) : baseType,
         cellData: (buyOrder.cellData ?? "0x") as Hex,
       },
       {
@@ -548,6 +569,8 @@ export default class DexOrderBot implements DexOrderBotTrait {
         },
         cellCapacity: BigInt(sellOrder.capacity),
         ownerLock: sellOrder.ownerLock as ccc.ScriptLike,
+        orderLock: sellOrder.lockScript as ccc.ScriptLike,
+        typeScript: sellOrder.typeScript ? (sellOrder.typeScript as ccc.ScriptLike) : baseType,
         cellData: (sellOrder.cellData ?? "0x") as Hex,
       },
     ];
@@ -559,6 +582,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
       takerIndex,
       market: marketInfo.config,
       treasuryLock: marketInfo.treasuryLock,
+      dexOrderLock: this.config.dexOrderLockScript,
       dexOrderLockCellDep: this.dexCellDeps[0],
       marketConfigCellDep: marketInfo.cellDep,
       xudtCellDeps: this.xudtCellDeps,

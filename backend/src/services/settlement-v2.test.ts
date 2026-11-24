@@ -320,3 +320,112 @@ test("zero trading fees do not create or charge for a treasury output", () => {
   assert.equal(result.treasuryOutputIndex, 0xffffffff);
   assert.ok(result.fills.every((fill) => fill.treasuryCapacity === 0n));
 });
+
+test("partial-fill successor uses dexOrderLock script and not ownerLock", () => {
+  const DEX_LOCK_CODE_HASH = ("0x" + "88".repeat(32)) as Hex;
+  const OWNER_LOCK_CODE_HASH = ("0x" + "11".repeat(32)) as Hex;
+
+  const buyOrder: DexV2Order = {
+    side: "BUY",
+    kind: "LIMIT",
+    owner: DUMMY_HASH_1,
+    market: DUMMY_HASH_2,
+    nonce: DUMMY_HASH_3,
+    priceNum: 50n,
+    priceDen: 1n,
+    initialBase: 1000n,
+    remainingBase: 1000n,
+    remainingOffer: 50_000n,
+    feeReserve: 100n,
+    costBudget: 50_000_000_000n,
+    maxNetworkFee: 10_000_000n,
+    maxRefundFee: 5_000_000n,
+    refundAfter: 1_800_000_000n,
+    minFill: 100n,
+  };
+
+  const sellOrder: DexV2Order = {
+    side: "SELL",
+    kind: "LIMIT",
+    owner: DUMMY_HASH_4,
+    market: DUMMY_HASH_2,
+    nonce: ("0x" + "b".repeat(64)) as Hex,
+    priceNum: 50n,
+    priceDen: 1n,
+    initialBase: 400n,
+    remainingBase: 400n,
+    remainingOffer: 400n,
+    feeReserve: 0n,
+    costBudget: 50_000_000_000n,
+    maxNetworkFee: 10_000_000n,
+    maxRefundFee: 5_000_000n,
+    refundAfter: 1_800_000_000n,
+    minFill: 100n,
+  };
+
+  const orders: SettlementInputOrder[] = [
+    {
+      order: buyOrder,
+      outPoint: { txHash: "0x" + "1".repeat(64), index: 0 },
+      cellCapacity: 100_0000_0000n,
+      ownerLock: { codeHash: OWNER_LOCK_CODE_HASH, hashType: "type", args: "0x01" },
+      orderLock: { codeHash: DEX_LOCK_CODE_HASH, hashType: "data2", args: "0x" },
+      cellData: "0x",
+    },
+    {
+      order: sellOrder,
+      outPoint: { txHash: "0x" + "2".repeat(64), index: 0 },
+      cellCapacity: 100_0000_0000n,
+      ownerLock: { codeHash: DUMMY_HASH_4, hashType: "type", args: "0x02" },
+      orderLock: { codeHash: DEX_LOCK_CODE_HASH, hashType: "data2", args: "0x" },
+      cellData: "0x",
+    },
+  ];
+
+  const result = buildV2Settlement({
+    orders,
+    takerIndex: 0,
+    market: mockMarket,
+    treasuryLock,
+    dexOrderLock: { codeHash: DEX_LOCK_CODE_HASH, hashType: "data2", args: "0x" },
+    dexOrderLockCellDep: dummyCellDep,
+    marketConfigCellDep: dummyCellDep,
+    xudtCellDeps: [dummyCellDep],
+  });
+
+  const successorIdx = result.fills[0].successor;
+  assert.notEqual(successorIdx, 0xffffffff);
+  const successorOutput = result.tx.outputs[successorIdx];
+
+  // Successor lock must match DEX order lock, NOT the owner lock
+  assert.equal(successorOutput.lock.codeHash, DEX_LOCK_CODE_HASH);
+  assert.equal(successorOutput.lock.hashType, "data2");
+  assert.notEqual(successorOutput.lock.codeHash, OWNER_LOCK_CODE_HASH);
+});
+
+test("buyer payout cell includes unspent capacity refund matching smart contract accounting", () => {
+  const params = treasuryFixture();
+  const buyInput = params.orders[0];
+  const initialCapacity = buyInput.cellCapacity;
+
+  const result = buildV2Settlement(params);
+  const buyFill = result.fills[0];
+  const buyerPayout = result.tx.outputs[buyFill.payout];
+
+  // Smart contract rule:
+  // expected_capacity = original_capacity + native_received - native_spent
+  // accounted = returned_capacity + cost
+  // expected_capacity == accounted
+  const fillQuote = buyFill.quote;
+  const takerFeeRate = BigInt(params.market.takerBps);
+  const takerFee = (fillQuote * takerFeeRate) / 10000n;
+  const nativeSpent = fillQuote + takerFee;
+  const expectedCapacity = initialCapacity - nativeSpent;
+  const cost = buyFill.networkFee + buyFill.treasuryCapacity;
+
+  // Accounted returned capacity = payout capacity (for full fill)
+  assert.equal(buyerPayout.capacity, expectedCapacity - cost);
+  assert.equal(buyerPayout.capacity + cost, expectedCapacity);
+  assert.ok(buyerPayout.capacity > 61_0000_0000n); // Much larger than bare minimum cell capacity
+});
+
