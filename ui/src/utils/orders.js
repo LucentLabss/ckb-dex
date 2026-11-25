@@ -93,17 +93,43 @@ export const OPEN_STATUSES = new Set(["DISCOVERED", "LIVE", "RESERVED", "PENDING
 /** Maps a backend OrderDocument (ckb-dex/backend/src/models/order.ts) to a table row. */
 export function toOrderRow(doc, token) {
   const decimals = token?.decimals ?? 0;
-  const amountUnits = BigInt(doc.remainingAmount ?? doc.tokenAmount ?? 0);
-  const totalShannons = BigInt(doc.pricePerToken ?? 0);
-  const amount = Number(ccc.fixedPointToString(amountUnits, decimals));
-  const total = Number(ccc.fixedPointToString(totalShannons, CKB_DECIMALS));
+  const isV2 = doc.orderVersion === 2 || doc.priceNum !== undefined || doc.marketConfigHash !== undefined;
+
+  let amount = 0;
+  let price = 0;
+  let total = 0;
+
+  if (isV2) {
+    const isClosed = !OPEN_STATUSES.has(doc.status);
+    const amountUnits = BigInt(
+      (isClosed ? (doc.initialBase ?? doc.tokenAmount) : null) ??
+      doc.remainingBase ??
+      doc.remainingAmount ??
+      doc.tokenAmount ??
+      doc.initialBase ??
+      0
+    );
+    amount = Number(ccc.fixedPointToString(amountUnits, decimals));
+
+    const priceNum = BigInt(doc.priceNum ?? doc.pricePerToken ?? 0);
+    const priceDen = BigInt(doc.priceDen ?? 1) || 1n;
+    const unitPrice = Number(priceNum) / Number(priceDen);
+    price = (unitPrice * Math.pow(10, decimals)) / 1e8;
+    total = price * amount;
+  } else {
+    const amountUnits = BigInt(doc.remainingAmount ?? doc.tokenAmount ?? 0);
+    const totalShannons = BigInt(doc.pricePerToken ?? 0);
+    amount = Number(ccc.fixedPointToString(amountUnits, decimals));
+    total = Number(ccc.fixedPointToString(totalShannons, CKB_DECIMALS));
+    price = amount ? total / amount : 0;
+  }
 
   return {
     id: doc._id ?? `${doc.outPoint.txHash}:${doc.outPoint.index}`,
     pair: `${token?.symbol ?? "xUDT"}/CKB`,
     side: doc.direction === "BID" ? "Buy" : "Sell",
     type: "Limit",
-    price: amount ? total / amount : 0,
+    price,
     amount,
     total,
     status: STATUS_LABELS[doc.status] ?? doc.status,

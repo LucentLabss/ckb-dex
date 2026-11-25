@@ -17,7 +17,7 @@ const matchesToken = (d, t) =>
   (marketHash && d.marketConfigHash?.toLowerCase() === marketHash.toLowerCase());
 import { OPEN_STATUSES, pendingOrderRow, toOrderRow } from "../utils/orders.js";
 import { logAction } from "../utils/errors.js";
-import { fmtNum } from "../utils/format.js";
+import { fmtNum, fmtPriceAuto } from "../utils/format.js";
 
 const PENDING_POLL_MS = 30_000;
 /** Fallback refresh while we have open orders, in case realtime silently dropped (common on mobile). */
@@ -172,7 +172,7 @@ export function useOrders() {
       const before = prev.get(id);
       if (!before || before === d.status || !OPEN_STATUSES.has(before)) continue;
       const row = toOrderRow(d, token);
-      const what = `${row.side} ${fmtNum(row.amount)} ${token?.symbol ?? ""} @ ${fmtNum(row.price)} CKB`;
+      const what = `${row.side} ${fmtNum(row.amount)} ${token?.symbol ?? ""} @ ${fmtPriceAuto(row.price)} CKB`;
       logAction(`Order ${d.status.toLowerCase()}`, d);
       changed = true;
       if (d.status === "FILLED") notify({ type: "success", title: "Order filled", message: what });
@@ -283,7 +283,7 @@ export function useOrders() {
       notify({
         type: "success",
         title: "Order submitted",
-        message: `${row.side} ${fmtNum(row.amount)} ${token.symbol} @ ${fmtNum(row.price)} CKB. It appears in Open orders once confirmed on-chain.`,
+        message: `${row.side} ${fmtNum(row.amount)} ${token.symbol} @ ${fmtPriceAuto(row.price)} CKB. It appears in Open orders once confirmed on-chain.`,
       });
       return txHash;
     },

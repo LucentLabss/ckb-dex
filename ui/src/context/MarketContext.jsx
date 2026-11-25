@@ -18,9 +18,15 @@ const IN_FLIGHT = ["RESERVED", "PENDING", "SETTLEMENT_SUBMITTED"];
 const HELD_RECHECK_MS = 30_000;
 const HELD_MAX_AGE_MS = 30 * 60 * 1000;
 
-/** CKB per whole token for a confirmed trade (`price` is the flat total in shannons). */
+/** CKB per whole token for a confirmed trade. In V2, trade.price is unit price in Shannons per base unit. */
 function tradeRow(trade, decimals) {
   const amount = Number(ccc.fixedPointToString(BigInt(trade.tokenAmount), decimals));
+  const isV2 = trade.isPartialFill !== undefined || trade.executedBase !== undefined || trade.executedQuote !== undefined;
+  if (isV2) {
+    const unitPrice = (Number(trade.price) * Math.pow(10, decimals)) / 1e8;
+    const total = unitPrice * amount;
+    return { price: unitPrice, amount, total, time: new Date(trade.createdAt) };
+  }
   const total = Number(ccc.fixedPointToString(BigInt(trade.price)));
   return { price: amount ? total / amount : 0, amount, total, time: new Date(trade.createdAt) };
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useWallet } from "../../context/WalletContext.jsx";
 import { ORDER_COLUMNS } from "../../data/mock.js";
-import { fmtNum, fmtTime } from "../../utils/format.js";
+import { fmtNum, fmtPriceAuto, fmtTime } from "../../utils/format.js";
 
 function Row({ order, onCancel }) {
   return (
@@ -11,9 +11,9 @@ function Row({ order, onCancel }) {
         {order.side}
       </span>
       <span>{order.type}</span>
-      <span>{fmtNum(order.price)}</span>
+      <span>{fmtPriceAuto(order.price)}</span>
       <span>{fmtNum(order.amount)}</span>
-      <span>{fmtNum(order.total)}</span>
+      <span>{fmtPriceAuto(order.total)}</span>
       <span title={order.txHash ?? undefined}>{order.status}</span>
       <span>{fmtTime(order.time)}</span>
       <span className="row-action">
