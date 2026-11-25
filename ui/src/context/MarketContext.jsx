@@ -75,6 +75,7 @@ export function MarketProvider({ children }) {
   const [book, setBook] = useState(null);
   const [trades, setTrades] = useState(null);
   const [status, setStatus] = useState("loading");
+  const [retryCount, setRetryCount] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   // Orders that left the LIVE book: key -> { doc, phase: "checking" | "settling", since }.
   const [held, setHeld] = useState(() => new Map());
@@ -206,7 +207,18 @@ export function MarketProvider({ children }) {
       offBook();
       offTrades();
     };
-  }, [token, notifyError, applyBook, applyTrades]);
+  }, [token, retryCount, notifyError, applyBook, applyTrades]);
+
+  // If market data failed to load (e.g. backend cold starting), retry every 5s while visible
+  useEffect(() => {
+    if (status !== "offline" || !token) return;
+    const timer = setTimeout(() => {
+      if (document.visibilityState === "visible") {
+        setRetryCount((c) => c + 1);
+      }
+    }, 5_000);
+    return () => clearTimeout(timer);
+  }, [status, token]);
 
   // Re-check held orders in case a realtime message was missed; give up after a while.
   useEffect(() => {
@@ -226,14 +238,14 @@ export function MarketProvider({ children }) {
     if (!token || !pending.length) return;
     const id = setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      if (isRealtimeConnected()) return;
+      if (isRealtimeConnected() && book !== null) return;
       marketApi
         .getOrderBook({ xudtTypeHash: token.typeHash, limit: 200 })
         .then(applyBook)
         .catch((err) => console.warn("[LucentDex] Order book refresh failed:", err.message));
     }, PENDING_POLL_MS);
     return () => clearInterval(id);
-  }, [token, pending.length, applyBook]);
+  }, [token, pending.length, book, applyBook]);
 
   const value = useMemo(() => {
     const decimals = token?.decimals ?? 0;

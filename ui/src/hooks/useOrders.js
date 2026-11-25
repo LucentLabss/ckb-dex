@@ -78,16 +78,27 @@ export function useOrders() {
     };
   }, [lockHash, token, load]);
 
+  // If loading failed (e.g. backend waking up), retry while the page is visible
+  useEffect(() => {
+    if (!loadError || !lockHash) return;
+    const timer = setTimeout(() => {
+      if (document.visibilityState === "visible") {
+        load();
+      }
+    }, 5_000);
+    return () => clearTimeout(timer);
+  }, [loadError, lockHash, load]);
+
   // Until the backend picks up our submitted orders, poll in case realtime is down.
   useEffect(() => {
     if (!pending.length) return;
     const id = setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      if (isRealtimeConnected()) return;
+      if (isRealtimeConnected() && docs.length > 0) return;
       load();
     }, PENDING_POLL_MS);
     return () => clearInterval(id);
-  }, [pending.length, load]);
+  }, [pending.length, docs.length, load]);
 
   // While any of our orders is open, re-check it now and then: a mobile browser
   // can drop the realtime socket without notice, and the fill would go unseen.
