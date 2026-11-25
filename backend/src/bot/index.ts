@@ -53,6 +53,8 @@ const MAX_MATCHES_PER_TICK = 10;
 const RESERVATION_TTL_MS = 5 * 60 * 1_000;
 // Matches the fixed fee rate the UI uses for its own order transactions (see ui/src/lib/dex.ts).
 const SETTLEMENT_FEE_RATE = 1_000n;
+// Minimum cost budget required to cover an order's share of the V2 treasury cell (~30.5 CKB) + fee
+export const MIN_V2_SETTLEMENT_COST_BUDGET = 31n * 100_000_000n;
 
 export default class DexOrderBot implements DexOrderBotTrait {
   readonly config: Config;
@@ -712,6 +714,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
     for (const order of this.sort(orders)) {
       if (this.health.isOrderQuarantined(order._id!, now)) continue;
       if (order.orderVersion === 2 || (order.marketConfigHash && order.marketConfigHash !== "0x")) {
+        const v2 = this.toDexV2Order(order);
+        if (v2.costBudget < MIN_V2_SETTLEMENT_COST_BUDGET) {
+          continue; // Order cannot settle under V2 rules (needs at least ~30.5 CKB for treasury share)
+        }
         v2Orders.push(order);
       } else {
         v1Orders.push(order);
@@ -914,6 +920,16 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (code === "INSUFFICIENT_BUY_CAPACITY") {
       // The buy cell can never fund a settlement; every sell it would meet fails the same way.
       this.health.quarantineOrder(buy._id!, ORDER_QUARANTINE_MS);
+    } else if (err instanceof AppError && /cost budget .* is insufficient/i.test(err.message)) {
+      // Quarantine only the order that actually lacked budget so the valid counterparty remains matchable
+      const buyV2 = this.toDexV2Order(buy);
+      const sellV2 = this.toDexV2Order(sell);
+      if (buyV2.costBudget < MIN_V2_SETTLEMENT_COST_BUDGET) {
+        this.health.quarantineOrder(buy._id!);
+      }
+      if (sellV2.costBudget < MIN_V2_SETTLEMENT_COST_BUDGET) {
+        this.health.quarantineOrder(sell._id!);
+      }
     } else if (err instanceof AppError && err.statusCode === 400) {
       this.health.quarantineOrder(buy._id!);
       this.health.quarantineOrder(sell._id!);

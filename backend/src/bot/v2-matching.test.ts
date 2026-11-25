@@ -330,3 +330,60 @@ test("executeV2Trade builds and submits a V2 settlement transaction", async () =
   assert.ok(tx.cellDeps.length >= 3);
   assert.ok(tx.outputs.some((output) => output.lock.hash() === mockMarketConfig.treasury));
 });
+
+test("findMatches ignores V2 orders with insufficient cost budget (< 31 CKB)", () => {
+  const bot = bareBot();
+
+  const underfundedSell = {
+    _id: "v2-sell-underfunded",
+    direction: "ASK",
+    orderVersion: 2,
+    marketConfigHash: MARKET_CONFIG_HASH,
+    remainingBase: "500",
+    remainingAmount: "500",
+    priceNum: "50",
+    priceDen: "1",
+    pricePerToken: "50",
+    costBudget: (100_000_000n).toString(), // 1 CKB (insufficient for ~30.5 CKB share)
+    minFill: "100",
+    blockNumber: "1",
+    txIndex: "0",
+  } as unknown as OrderDoc;
+
+  const validSell = {
+    _id: "v2-sell-valid",
+    direction: "ASK",
+    orderVersion: 2,
+    marketConfigHash: MARKET_CONFIG_HASH,
+    remainingBase: "500",
+    remainingAmount: "500",
+    priceNum: "50",
+    priceDen: "1",
+    pricePerToken: "50",
+    costBudget: (100n * 100_000_000n).toString(), // 100 CKB
+    minFill: "100",
+    blockNumber: "2",
+    txIndex: "0",
+  } as unknown as OrderDoc;
+
+  const validBuy = {
+    _id: "v2-buy-valid",
+    direction: "BID",
+    orderVersion: 2,
+    marketConfigHash: MARKET_CONFIG_HASH,
+    remainingBase: "500",
+    remainingAmount: "500",
+    priceNum: "50",
+    priceDen: "1",
+    pricePerToken: "50",
+    costBudget: (100n * 100_000_000n).toString(), // 100 CKB
+    minFill: "100",
+    blockNumber: "3",
+    txIndex: "0",
+  } as unknown as OrderDoc;
+
+  const matches = bot.findMatches([underfundedSell, validSell, validBuy]);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].buy._id, "v2-buy-valid");
+  assert.equal(matches[0].sell._id, "v2-sell-valid");
+});
