@@ -173,14 +173,14 @@ test("buildV2Settlement handles partial fill and creates successor cell", () => 
     {
       order: buyOrder,
       outPoint: { txHash: "0x" + "1".repeat(64), index: 0 },
-      cellCapacity: 100_0000_0000n,
+      cellCapacity: buyOrder.remainingOffer + buyOrder.feeReserve + 1000n * 100_000_000n,
       ownerLock: { codeHash: DUMMY_HASH_1, hashType: "type", args: "0x01" },
       cellData: "0x",
     },
     {
       order: sellOrder,
       outPoint: { txHash: "0x" + "2".repeat(64), index: 0 },
-      cellCapacity: 100_0000_0000n,
+      cellCapacity: 1000n * 100_000_000n,
       ownerLock: { codeHash: DUMMY_HASH_4, hashType: "type", args: "0x02" },
       cellData: "0x",
     },
@@ -367,7 +367,7 @@ test("partial-fill successor uses dexOrderLock script and not ownerLock", () => 
     {
       order: buyOrder,
       outPoint: { txHash: "0x" + "1".repeat(64), index: 0 },
-      cellCapacity: 100_0000_0000n,
+      cellCapacity: buyOrder.remainingOffer + buyOrder.feeReserve + 1000n * 100_000_000n,
       ownerLock: { codeHash: OWNER_LOCK_CODE_HASH, hashType: "type", args: "0x01" },
       orderLock: { codeHash: DEX_LOCK_CODE_HASH, hashType: "data2", args: "0x" },
       cellData: "0x",
@@ -375,7 +375,7 @@ test("partial-fill successor uses dexOrderLock script and not ownerLock", () => 
     {
       order: sellOrder,
       outPoint: { txHash: "0x" + "2".repeat(64), index: 0 },
-      cellCapacity: 100_0000_0000n,
+      cellCapacity: 1000n * 100_000_000n,
       ownerLock: { codeHash: DUMMY_HASH_4, hashType: "type", args: "0x02" },
       orderLock: { codeHash: DEX_LOCK_CODE_HASH, hashType: "data2", args: "0x" },
       cellData: "0x",

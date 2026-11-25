@@ -114,9 +114,11 @@ export function buyOrderCellOccupiedCapacity(makerLock) {
 
 /** Capacity of the token cell a buyer receives on settlement (its minimum occupied size). */
 export function settlementTokenCellCapacity(makerLock, token, tokenAmount) {
+  const dummyLock = makerLock ?? { codeHash: "0x" + "11".repeat(32), hashType: "type", args: "0x" + "00".repeat(20) };
+  const tokenType = token?.type ?? (token?.typeHash ? { codeHash: "0x" + "22".repeat(32), hashType: "type", args: "0x" + "00".repeat(32) } : undefined);
   const scratch = ccc.Transaction.from({
-    outputs: [{ lock: makerLock, type: token.type }],
-    outputsData: [ccc.numLeToBytes(tokenAmount, 16)],
+    outputs: [{ lock: dummyLock, type: tokenType }],
+    outputsData: [ccc.numLeToBytes(tokenAmount ?? 1n, 16)],
   });
   return scratch.outputs[0].capacity;
 }
@@ -124,12 +126,14 @@ export function settlementTokenCellCapacity(makerLock, token, tokenAmount) {
 /**
  * CKB a buy order locks up:
  * On-chain V2 escrow requires: cap >= occupied + cost_budget + remaining_offer + fee_reserve.
+ * For partial fills, the order cell must also fund the token payout cell it creates on settlement.
  */
 export function buyOrderCapacity(makerLock, token, tokenAmount, totalPrice) {
   const occupied = buyOrderCellOccupiedCapacity(makerLock);
+  const tokenPayoutOccupied = settlementTokenCellCapacity(makerLock, token, tokenAmount);
   const worstRate = BigInt(Math.max(marketInfo?.config?.makerBps ?? 10, marketInfo?.config?.takerBps ?? 20));
   const feeReserve = ceilDiv(BigInt(totalPrice) * worstRate, BPS);
-  return occupied + DEFAULT_COST_BUDGET + BigInt(totalPrice) + feeReserve;
+  return occupied + tokenPayoutOccupied + DEFAULT_COST_BUDGET + BigInt(totalPrice) + feeReserve;
 }
 
 /**

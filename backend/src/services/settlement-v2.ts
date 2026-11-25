@@ -229,56 +229,50 @@ export function buildV2Settlement(params: BuildSettlementParams): BuiltSettlemen
     const expectedCapacity = inputOrder.cellCapacity + nativeReceived - nativeSpent;
     const totalReturnedNeeded = expectedCapacity - cost;
 
-    // Safety guard for synthetic mock test fixtures where input capacity is smaller than required
-    if (isPartialFill && successorCapacity > totalReturnedNeeded - MIN_CELL_CAPACITY) {
-      successorCapacity = totalReturnedNeeded > MIN_CELL_CAPACITY
-        ? totalReturnedNeeded - MIN_CELL_CAPACITY
-        : MIN_CELL_CAPACITY;
-    }
-
-    let payoutCapacity = totalReturnedNeeded - (isPartialFill ? successorCapacity : 0n);
-    if (payoutCapacity < MIN_CELL_CAPACITY) {
-      payoutCapacity = MIN_CELL_CAPACITY;
-    }
-
-    let payoutIdx = INDEX_NONE;
-    if (ord.side === "BUY") {
+    const isBuy = ord.side === "BUY";
+    const payoutType = isBuy ? baseType : (isQuoteNative ? undefined : quoteType);
+    let payoutData: Hex = "0x";
+    if (isBuy || !isQuoteNative) {
+      const udtAmount = isBuy ? fillBase : (fillQuote - fee);
       const udtAmountLe = Buffer.alloc(16);
-      const lo = fillBase & 0xffff_ffff_ffff_ffffn;
-      const hi = (fillBase >> 64n) & 0xffff_ffff_ffff_ffffn;
-      udtAmountLe.writeBigUInt64LE(lo, 0);
-      udtAmountLe.writeBigUInt64LE(hi, 8);
+      udtAmountLe.writeBigUInt64LE(udtAmount & 0xffff_ffff_ffff_ffffn, 0);
+      udtAmountLe.writeBigUInt64LE((udtAmount >> 64n) & 0xffff_ffff_ffff_ffffn, 8);
+      payoutData = toHex(udtAmountLe);
+    }
 
-      payoutIdx = addOutput(
-        inputOrder.ownerLock,
-        payoutCapacity,
-        baseType,
-        toHex(udtAmountLe),
-      );
-    } else {
-      const netQuoteReceived = fillQuote - fee;
-      if (isQuoteNative) {
-        payoutIdx = addOutput(
-          inputOrder.ownerLock,
-          payoutCapacity,
-          undefined,
-          "0x",
-        );
-      } else {
-        const udtAmountLe = Buffer.alloc(16);
-        const lo = netQuoteReceived & 0xffff_ffff_ffff_ffffn;
-        const hi = (netQuoteReceived >> 64n) & 0xffff_ffff_ffff_ffffn;
-        udtAmountLe.writeBigUInt64LE(lo, 0);
-        udtAmountLe.writeBigUInt64LE(hi, 8);
+    const minPayoutCapacity = ccc.CellOutput.from(
+      { lock: inputOrder.ownerLock, type: payoutType },
+      payoutData,
+    ).capacity;
 
-        payoutIdx = addOutput(
-          inputOrder.ownerLock,
-          payoutCapacity,
-          quoteType,
-          toHex(udtAmountLe),
+    let payoutCapacity = 0n;
+    if (isPartialFill) {
+      if (totalReturnedNeeded < successorCapacity + minPayoutCapacity) {
+        throw new AppError(
+          400,
+          `order ${i} (${ord.side}) has insufficient capacity for partial fill: required at least ${successorCapacity + minPayoutCapacity} shannons (successor: ${successorCapacity}, min payout: ${minPayoutCapacity}), available ${totalReturnedNeeded} shannons`,
+          "INSUFFICIENT_PARTIAL_FILL_CAPACITY",
         );
       }
+      payoutCapacity = totalReturnedNeeded - successorCapacity;
+    } else {
+      if (totalReturnedNeeded < minPayoutCapacity) {
+        throw new AppError(
+          400,
+          `order ${i} (${ord.side}) has insufficient capacity for payout: required at least ${minPayoutCapacity} shannons, available ${totalReturnedNeeded} shannons`,
+          "INSUFFICIENT_PAYOUT_CAPACITY",
+        );
+      }
+      payoutCapacity = totalReturnedNeeded;
     }
+
+    const payoutIdx = addOutput(
+      inputOrder.ownerLock,
+      payoutCapacity,
+      payoutType,
+      payoutData,
+    );
+
 
     let successorIdx = INDEX_NONE;
     if (isPartialFill && successorLock) {

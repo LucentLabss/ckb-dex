@@ -786,6 +786,13 @@ export default class DexOrderBot implements DexOrderBotTrait {
           const fillBase = buyRemaining < sellRemaining ? buyRemaining : sellRemaining;
           if (fillBase < buyMinFill || fillBase < sellMinFill) continue;
 
+          // If the buy order is partially filled (buyRemaining > sellRemaining),
+          // verify that the buy cell has enough capacity to fund both its successor order cell
+          // and the token payout cell. If not, this buy order can only be matched as a full fill.
+          if (buyRemaining > sellRemaining && !this.canBuyOrderPartialFill(buy)) {
+            continue;
+          }
+
           taken.add(sell._id!);
           pairs.push({ buy, sell });
           break; // proceed to next buy
@@ -798,6 +805,17 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
   private get health(): MatchHealth {
     return (this._health ??= new MatchHealth());
+  }
+
+  private canBuyOrderPartialFill(buy: OrderDoc): boolean {
+    const capacity = BigInt(buy.capacity ?? 0);
+    const offer = BigInt(buy.remainingOffer ?? buy.remainingAmount ?? 0);
+    const costBudget = BigInt(buy.costBudget ?? 100n * 100_000_000n);
+    const feeReserve = BigInt(buy.feeReserve ?? 0n);
+    // V2 buy order cell needs ~284 CKB occupied + costBudget + offer + feeReserve.
+    // To support a partial fill, it must also have capacity for the token payout cell (at least 61 CKB, typically ~142 CKB).
+    const minNeededForPartialFill = 284_0000_0000n + costBudget + offer + feeReserve + 61_0000_0000n;
+    return capacity >= minNeededForPartialFill;
   }
 
   /**
@@ -925,6 +943,11 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (code === "INSUFFICIENT_BUY_CAPACITY") {
       // The buy cell can never fund a settlement; every sell it would meet fails the same way.
       this.health.quarantineOrder(buy._id!, ORDER_QUARANTINE_MS);
+    } else if (code === "INSUFFICIENT_PARTIAL_FILL_CAPACITY") {
+      // The order cannot fund a partial fill; back off this specific pair so it doesn't spin,
+      // but keep both orders live for full-fill matches.
+      const delay = this.health.recordPairFailure(buy._id!, sell._id!);
+      console.warn(`DexOrderBot pair ${buy._id}/${sell._id} cannot partial fill (needs full fill); backed off ${delay}ms`);
     } else if (err instanceof AppError && /cost budget .* is insufficient/i.test(err.message)) {
       // Quarantine only the order that actually lacked budget so the valid counterparty remains matchable
       const buyV2 = this.toDexV2Order(buy);
