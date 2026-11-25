@@ -34,7 +34,7 @@ export const ORDER_VERSION = 2;
 export { SIDE_BUY, SIDE_SELL };
 const FEE_RATE = 1_000;
 
-export const DEFAULT_COST_BUDGET = 100_000_000n; // 1 CKB
+export const DEFAULT_COST_BUDGET = 100n * 100_000_000n; // 100 CKB (funds treasury storage share ~30.5 CKB per match; unspent budget is refunded on fill or cancel)
 export const DEFAULT_MAX_NETWORK_FEE = 10_000n;
 export const DEFAULT_MAX_REFUND_FEE = 10_000n;
 
