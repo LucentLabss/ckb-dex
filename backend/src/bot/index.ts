@@ -808,7 +808,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   private canBuyOrderPartialFill(buy: OrderDoc): boolean {
-    const capacity = BigInt(buy.capacity ?? 0);
+    if (buy.capacity === undefined || buy.capacity === null) {
+      return true;
+    }
+    const capacity = BigInt(buy.capacity);
     const offer = BigInt(buy.remainingOffer ?? buy.remainingAmount ?? 0);
     const costBudget = BigInt(buy.costBudget ?? 100n * 100_000_000n);
     const feeReserve = BigInt(buy.feeReserve ?? 0n);
@@ -879,6 +882,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     if (!pendingTx?.transaction || pendingTx.blockNumber === undefined) return false;
 
+    const buyRemaining = BigInt(buyOrder.remainingBase ?? buyOrder.remainingAmount);
+    const sellRemaining = BigInt(sellOrder.remainingBase ?? sellOrder.remainingAmount);
+    const tradedAmount = buyRemaining < sellRemaining ? buyRemaining : sellRemaining;
+
     await this.emit({
       schemaVersion: 1,
       eventId: `trade-confirmed:${txHash}:${pendingTx.blockHash}`,
@@ -900,7 +907,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
         buyerLockHash: buyOrder.ownerLockHash as Hex,
         sellerLockHash: sellOrder.ownerLockHash as Hex,
         xudtTypeHash: sellOrder.xudtTypeHash as Hex,
-        tokenAmount: sellOrder.remainingAmount.toString(),
+        tokenAmount: tradedAmount.toString(),
         price: sellOrder.pricePerToken.toString(),
         paidCapacity: sellOrder.pricePerToken.toString(),
         confirmedAtBlock: pendingTx.blockNumber.toString(),
@@ -1077,31 +1084,39 @@ export default class DexOrderBot implements DexOrderBotTrait {
 
     const ownerAddress = ccc.Address.fromScript(ownerLock, this.client).toString();
 
-    await this.emit({
-      schemaVersion: 1,
-      eventId: `order-confirmed:${id}:${creatingTx.blockHash}`,
-      occurredAt: new Date().toISOString(),
-      transactionHash: cell.outPoint.txHash,
-      blockNumber: creatingTx.blockNumber.toString(),
-      blockHash: creatingTx.blockHash,
-      eventType: "order-confirmed",
-      outPoint: { txHash: cell.outPoint.txHash, index: cell.outPoint.index.toString() },
-      order: {
-        lockScript: cell.cellOutput.lock,
-        typeScript: cell.cellOutput.type,
-        cellData: cell.outputData,
-        capacity: cell.cellOutput.capacity.toString(),
-        ownerLock,
-        ownerLockHash: decoded.makerLockHash,
-        ownerAddress,
-        direction: decoded.direction,
-        pricePerToken: decoded.pricePerToken.toString(),
-        tokenAmount: decoded.tokenAmount.toString(),
-        xudtTypeHash: decoded.udtTypeHash,
+    try {
+      await this.emit({
+        schemaVersion: 1,
+        eventId: `order-confirmed:${id}:${creatingTx.blockHash}`,
+        occurredAt: new Date().toISOString(),
+        transactionHash: cell.outPoint.txHash,
         blockNumber: creatingTx.blockNumber.toString(),
-        txIndex: (creatingTx.txIndex ?? 0n).toString(),
-      },
-    } as BotEvent);
+        blockHash: creatingTx.blockHash,
+        eventType: "order-confirmed",
+        outPoint: { txHash: cell.outPoint.txHash, index: cell.outPoint.index.toString() },
+        order: {
+          lockScript: cell.cellOutput.lock,
+          typeScript: cell.cellOutput.type,
+          cellData: cell.outputData,
+          capacity: cell.cellOutput.capacity.toString(),
+          ownerLock,
+          ownerLockHash: decoded.makerLockHash,
+          ownerAddress,
+          direction: decoded.direction,
+          pricePerToken: decoded.pricePerToken.toString(),
+          tokenAmount: decoded.tokenAmount.toString(),
+          xudtTypeHash: decoded.udtTypeHash,
+          blockNumber: creatingTx.blockNumber.toString(),
+          txIndex: (creatingTx.txIndex ?? 0n).toString(),
+        },
+      } as BotEvent);
+    } catch (err) {
+      if (err instanceof AppError && err.statusCode === 422) {
+        console.warn(`skipping unverified dex order cell ${id}: ${(err as Error).message}`);
+        return undefined;
+      }
+      throw err;
+    }
 
     return (await Order.findById(id)) ?? undefined;
   }
@@ -1205,6 +1220,10 @@ export default class DexOrderBot implements DexOrderBotTrait {
     if (!buyOrder || !sellOrder) return; // the counterpart is unknown to us; nothing safe to record
 
     const txHash = spendingTx.transaction.hash() as Hex;
+    const buyRemaining = BigInt(buyOrder.remainingBase ?? buyOrder.remainingAmount);
+    const sellRemaining = BigInt(sellOrder.remainingBase ?? sellOrder.remainingAmount);
+    const tradedAmount = buyRemaining < sellRemaining ? buyRemaining : sellRemaining;
+
     await this.emit({
       schemaVersion: 1,
       eventId: `trade-confirmed:${txHash}:${spendingTx.blockHash}`,
@@ -1220,7 +1239,7 @@ export default class DexOrderBot implements DexOrderBotTrait {
         buyerLockHash: buyOrder.ownerLockHash as Hex,
         sellerLockHash: sellOrder.ownerLockHash as Hex,
         xudtTypeHash: sellOrder.xudtTypeHash as Hex,
-        tokenAmount: sellOrder.remainingAmount.toString(),
+        tokenAmount: tradedAmount.toString(),
         price: sellOrder.pricePerToken.toString(),
         paidCapacity: sellOrder.pricePerToken.toString(),
         confirmedAtBlock: spendingTx.blockNumber.toString(),

@@ -66,7 +66,7 @@ async function requireConfirmed(
   return tx;
 }
 
-async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerification): Promise<void> {
+async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerification, load: LoadOrders): Promise<void> {
   const tx = await requireConfirmed(v, event.outPoint.txHash as Hex, event);
   if (event.order.blockNumber !== event.blockNumber) return reject("order block number disagrees with event");
   if (tx.txIndex !== undefined && BigInt(event.order.txIndex) !== tx.txIndex) return reject("tx index does not match the chain");
@@ -108,7 +108,16 @@ async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerifica
     }
 
     if (!sameHex(scriptHash(event.order.ownerLock), v2.owner)) return reject("owner lock does not hash to the maker lock hash");
-    if (!tx.inputLockHashes.some((hash) => sameHex(hash, v2.owner))) return reject("maker did not fund the order transaction");
+    const makerFunded = tx.inputLockHashes.some((hash) => sameHex(hash, v2.owner));
+    if (!makerFunded) {
+      // Successor order created by a DEX settlement transaction
+      const inputOrderIds = tx.inputs.map((inp) => outPointId(inp));
+      const priorOrders = await load(inputOrderIds);
+      const isSuccessor = priorOrders.some((prior) => sameHex(prior.ownerLockHash, v2.owner));
+      if (!isSuccessor) {
+        return reject("maker did not fund the order transaction");
+      }
+    }
     return;
   }
 
@@ -139,7 +148,15 @@ async function verifyOrderConfirmed(event: OrderConfirmedEvent, v: ChainVerifica
 
   // The maker lock never runs at creation, so tie it to the creating transaction's inputs.
   if (!sameHex(scriptHash(event.order.ownerLock), decoded.makerLockHash)) return reject("owner lock does not hash to the maker lock hash");
-  if (!tx.inputLockHashes.some((hash) => sameHex(hash, decoded.makerLockHash))) return reject("maker did not fund the order transaction");
+  const makerFunded = tx.inputLockHashes.some((hash) => sameHex(hash, decoded.makerLockHash));
+  if (!makerFunded) {
+    const inputOrderIds = tx.inputs.map((inp) => outPointId(inp));
+    const priorOrders = await load(inputOrderIds);
+    const isSuccessor = priorOrders.some((prior) => sameHex(prior.ownerLockHash, decoded.makerLockHash));
+    if (!isSuccessor) {
+      return reject("maker did not fund the order transaction");
+    }
+  }
 }
 
 async function verifyOrderCancelled(event: OrderCancelledEvent, v: ChainVerification, load: LoadOrders): Promise<void> {
@@ -203,7 +220,7 @@ async function verifyChainReorg(event: ChainReorgEvent, v: ChainVerification): P
 export async function verifyEvent(event: BotEvent, v: ChainVerification, load: LoadOrders): Promise<void> {
   switch (event.eventType) {
     case "order-confirmed":
-      return verifyOrderConfirmed(event, v);
+      return verifyOrderConfirmed(event, v, load);
     case "order-cancelled":
       return verifyOrderCancelled(event, v, load);
     case "settlement-submitted":
