@@ -3,10 +3,18 @@ import { useWallet } from "../context/WalletContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
 import { marketApi, subscribe, isRealtimeConnected } from "../services/api/index.js";
 import { buildCancelOrderTx, buildCreateOrderTx, readOwnOrderCell, walletDelta } from "../services/ckb/dex.js";
+import { marketHash } from "../services/ckb/client.js";
 import { addPending, removePending } from "../services/pendingOrders.js";
 import { usePendingOrders } from "./usePendingOrders.js";
 import { useClosedOrdersVersion } from "./useClosedOrders.js";
 import { closedStatus, markClosed } from "../services/closedOrders.js";
+
+const matchesToken = (d, t) =>
+  !t ||
+  !d ||
+  d.xudtTypeHash === t.typeHash ||
+  (marketHash && d.xudtTypeHash?.toLowerCase() === marketHash.toLowerCase()) ||
+  (marketHash && d.marketConfigHash?.toLowerCase() === marketHash.toLowerCase());
 import { OPEN_STATUSES, pendingOrderRow, toOrderRow } from "../utils/orders.js";
 import { logAction } from "../utils/errors.js";
 import { fmtNum } from "../utils/format.js";
@@ -34,7 +42,7 @@ export function useOrders() {
   const [docs, setDocs] = useState([]);
   const allPending = usePendingOrders(lockHash); // rows not yet indexed
   const pending = useMemo(
-    () => allPending.filter((r) => !token || !r.xudtTypeHash || r.xudtTypeHash === token.typeHash),
+    () => allPending.filter((r) => !token || !r.xudtTypeHash || matchesToken(r, token)),
     [allPending, token]
   );
   const [cancelling, setCancelling] = useState(() => new Set());
@@ -68,7 +76,7 @@ export function useOrders() {
     load(ctrl.signal);
     const unsubscribe = subscribe(`maker:${lockHash}:orders`, (items) => {
       if (Array.isArray(items)) {
-        setDocs(token ? items.filter((d) => d.xudtTypeHash === token.typeHash) : items);
+        setDocs(token ? items.filter((d) => matchesToken(d, token)) : items);
         setLoadError(null);
       }
     });

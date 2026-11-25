@@ -225,10 +225,15 @@ export default class DexOrderBot implements DexOrderBotTrait {
     const buf = toBuffer(script.args);
     if (buf.length === ORDER_ARGS_LEN) {
       const v2 = decodeDexV2Order(buf);
+      const deployment = getDeployment(this.config?.ckbNetwork ?? "testnet");
+      const marketBase =
+        deployment?.market?.marketHash.toLowerCase() === v2.market.toLowerCase()
+          ? deployment.market.config.base
+          : v2.market;
       return {
         makerLockHash: v2.owner,
         direction: v2.side === "BUY" ? "BID" : "ASK",
-        udtTypeHash: v2.market,
+        udtTypeHash: (marketBase ?? v2.market) as Hex,
         tokenAmount: v2.remainingBase,
         pricePerToken: v2.priceNum,
         orderVersion: 2,

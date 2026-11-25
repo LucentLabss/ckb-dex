@@ -7,8 +7,23 @@ import OrderModel, { ORDER_STATUS_VALUES } from "../models/order.js";
 import TradeModel from "../models/trade.js";
 import AppError from "../services/error.js";
 import { cursorSchema, decodeCursor, encodeCursor, limitSchema, sendSuccess } from "../utils/index.js";
+import { getDeployment } from "../../../shared/deployment.mjs";
 
 const router = Router();
+
+function assetFilter(xudtTypeHash?: string) {
+  if (!xudtTypeHash) return undefined;
+  try {
+    const deployment = getDeployment(process.env.CKB_NETWORK ?? "testnet");
+    const market = deployment?.market;
+    if (market && market.config.base.toLowerCase() === xudtTypeHash.toLowerCase()) {
+      return { $in: [xudtTypeHash, market.marketHash] };
+    }
+  } catch {
+    // ignore
+  }
+  return xudtTypeHash;
+}
 
 const hashSchema = z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Expected a 32-byte 0x-prefixed hash");
 const directionSchema = z.enum(["ASK", "BID"]);
@@ -60,7 +75,7 @@ router.get("/order-book", async (req: Request, res: Response) => {
   // Asks ascend and bids descend by price; ties resolve by chain order (price-time priority).
   const priceDirection = query.direction === "BID" ? -1 : 1;
   const filter: Record<string, unknown> = { status: "LIVE" };
-  if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
+  if (query.xudtTypeHash) filter.xudtTypeHash = assetFilter(query.xudtTypeHash);
   if (query.direction) filter.direction = query.direction;
 
   if (cursor) {
@@ -118,20 +133,41 @@ router.get("/orders/:txHash/:index", async (req: Request, res: Response) => {
 router.get("/orders", async (req: Request, res: Response) => {
   const query = orderQuerySchema.parse(req.query);
   const cursor = decodeCursor(query.cursor, orderListCursor);
-  const filter: Record<string, unknown> = {};
+  const conditions: Record<string, unknown>[] = [];
 
-  if (query.makerLockHash) filter.ownerLockHash = query.makerLockHash;
-  if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
-  if (query.direction) filter.direction = query.direction;
-  if (query.status) filter.status = query.status;
+  if (query.makerLockHash) conditions.push({ ownerLockHash: query.makerLockHash });
+  if (query.direction) conditions.push({ direction: query.direction });
+  if (query.status) conditions.push({ status: query.status });
+  if (query.xudtTypeHash) {
+    try {
+      const deployment = getDeployment(process.env.CKB_NETWORK ?? "testnet");
+      const market = deployment?.market;
+      if (market && market.config.base.toLowerCase() === query.xudtTypeHash.toLowerCase()) {
+        conditions.push({
+          $or: [
+            { xudtTypeHash: { $in: [query.xudtTypeHash, market.marketHash] } },
+            { marketConfigHash: market.marketHash },
+          ],
+        });
+      } else {
+        conditions.push({ xudtTypeHash: query.xudtTypeHash });
+      }
+    } catch {
+      conditions.push({ xudtTypeHash: query.xudtTypeHash });
+    }
+  }
 
   if (cursor) {
     const createdAt = new Date(cursor.c);
-    filter.$or = [
-      { createdAt: { $lt: createdAt } },
-      { createdAt, _id: { $gt: cursor.i } },
-    ];
+    conditions.push({
+      $or: [
+        { createdAt: { $lt: createdAt } },
+        { createdAt, _id: { $gt: cursor.i } },
+      ],
+    });
   }
+
+  const filter = conditions.length > 1 ? { $and: conditions } : (conditions[0] ?? {});
 
   const rows = await OrderModel.find(filter)
     .sort({ createdAt: -1, _id: 1 })
@@ -157,7 +193,7 @@ router.get("/trades", async (req: Request, res: Response) => {
   const cursor = decodeCursor(query.cursor, tradeCursor);
 
   const filter: Record<string, unknown> = { status: { $ne: "REVERTED" } };
-  if (query.xudtTypeHash) filter.xudtTypeHash = query.xudtTypeHash;
+  if (query.xudtTypeHash) filter.xudtTypeHash = assetFilter(query.xudtTypeHash);
   if (cursor) {
     filter.$or = [
       { blockNum: { $lt: cursor.b } },
