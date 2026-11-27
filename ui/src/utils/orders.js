@@ -47,6 +47,7 @@ export function buildOrderDraft({ side, orderPrice, amount }, token) {
 
   return {
     side,
+    type: "limit",
     contractSide: side === "buy" ? SIDE_BUY : SIDE_SELL,
     pricePerToken,
     tokenAmount,
@@ -150,7 +151,7 @@ export function pendingOrderRow(draft, txHash, token) {
     xudtTypeHash: token.typeHash,
     pair: `${token.symbol}/CKB`,
     side: draft.side === "buy" ? "Buy" : "Sell",
-    type: "Limit",
+    type: draft.type === "market" ? "Market" : "Limit",
     price: total / amount,
     amount,
     total,
@@ -161,4 +162,48 @@ export function pendingOrderRow(draft, txHash, token) {
     cancellable: true,
     time: new Date(),
   };
+}
+
+/** Default slippage tolerance for market orders (fraction of the worst book price crossed). */
+export const MARKET_SLIPPAGE = 0.01;
+
+/** Formats a CKB price with at most 8 decimals, never in exponent notation. */
+const toPriceInput = (n) => n.toFixed(CKB_DECIMALS).replace(/\.?0+$/, "");
+
+/**
+ * Prices a market order from the live book. The DEX has no instant execution,
+ * so a market order is a limit order priced to cross the book: it walks the
+ * opposite side (best price first) until `amount` is covered, then pads the
+ * worst price crossed by `slippage` so it stays marketable if the book moves.
+ * Returns { avgPrice, worstPrice, limitPrice (string, CKB per token) } or { field, error }.
+ */
+export function quoteMarketOrder({ side, amount, asks, bids, token, slippage = MARKET_SLIPPAGE }) {
+  const fail = (error) => ({ field: "amount", error });
+  const wanted = Number(String(amount ?? "").trim());
+  if (!String(amount ?? "").trim() || !Number.isFinite(wanted) || wanted <= 0) {
+    return fail(`Enter how many ${token?.symbol ?? "tokens"} you want to ${side === "buy" ? "buy" : "sell"}.`);
+  }
+  const levels = (side === "buy" ? asks : bids).filter((r) => !r.pending && !r.settling && r.amount > 0);
+  if (!levels.length) {
+    return fail(`There are no ${side === "buy" ? "sell" : "buy"} orders to fill against. Place a limit order instead.`);
+  }
+
+  let filled = 0;
+  let cost = 0;
+  let worstPrice = levels[0].price;
+  for (const level of levels) {
+    const take = Math.min(level.amount, wanted - filled);
+    filled += take;
+    cost += take * level.price;
+    worstPrice = level.price;
+    if (filled >= wanted) break;
+  }
+  if (filled < wanted) {
+    return fail(
+      `Only ${filled.toLocaleString("en-US", { maximumFractionDigits: token?.decimals ?? 8 })} ${token?.symbol ?? ""} is available on the other side of the book. Reduce the amount or place a limit order.`
+    );
+  }
+
+  const padded = side === "buy" ? worstPrice * (1 + slippage) : worstPrice * (1 - slippage);
+  return { avgPrice: cost / filled, worstPrice, limitPrice: toPriceInput(padded), slippage };
 }

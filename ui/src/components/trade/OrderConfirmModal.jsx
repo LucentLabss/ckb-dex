@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useWallet } from "../../context/WalletContext.jsx";
 import { useToast } from "../../context/ToastContext.jsx";
 import { ESTIMATED_ORDER_FEE, SETTLEMENT_FEE_RESERVE, sellOrderDeposit } from "../../services/ckb/dex.js";
-import { fmtCkb, fmtUnits, shortAddr } from "../../utils/format.js";
+import { fmtCkb, fmtPriceAuto, fmtUnits, shortAddr } from "../../utils/format.js";
 
 /**
  * Order review sheet. Slides up from the bottom-right over a blurred backdrop
@@ -63,6 +63,8 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
   };
 
   const isBuy = draft.side === "buy";
+  const isMarket = draft.type === "market";
+  const priceText = (n) => `${n} CKB / ${token.symbol}`;
   const tokenAmt = `${fmtUnits(draft.tokenAmount, token.decimals, token.decimals)} ${token.symbol}`;
   const exact = Boolean(prepared);
   const estimating = !exact && stage === "preparing";
@@ -81,10 +83,19 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
 
   const rows = [
     ["Pair", `${token.symbol} / CKB`],
-    ["Order type", "Limit"],
-    ["Price", `${fmtUnits(draft.pricePerToken, 8, 8)} CKB / ${token.symbol}`],
+    ["Order type", isMarket ? "Market" : "Limit"],
+    ...(isMarket
+      ? [
+          ["Est. price", `≈ ${priceText(fmtPriceAuto(draft.avgPrice))}`, "Average across the orders it fills against now"],
+          [
+            "Price limit",
+            priceText(fmtUnits(draft.pricePerToken, 8, 8)),
+            `Worst price you accept, including ${draft.slippage * 100}% slippage`,
+          ],
+        ]
+      : [["Price", priceText(fmtUnits(draft.pricePerToken, 8, 8))]]),
     ["Amount", tokenAmt],
-    ["Order total", fmtCkb(draft.totalPrice, 8)],
+    [isMarket ? "Max order total" : "Order total", fmtCkb(draft.totalPrice, 8)],
     isBuy
       ? [
           "Leaves your wallet",
@@ -147,9 +158,20 @@ export default function OrderConfirmModal({ draft, onPrepare, onConfirm, onClose
         </dl>
 
         <p className="sheet-note">
-          ⓘ Orders settle all-or-nothing: this order fills only against a counter-order for exactly{" "}
-          {tokenAmt} at {fmtCkb(draft.totalPrice, 8)} in total. Check every value above before signing —
-          your wallet will ask you to approve the transaction.
+          {isMarket ? (
+            <>
+              ⓘ Market orders are placed at your price limit so the matcher fills them against the best orders in
+              the book. If the book moves past your limit before it fills, the order stays open — you can cancel it
+              from Open orders. Check every value above before signing — your wallet will ask you to approve the
+              transaction.
+            </>
+          ) : (
+            <>
+              ⓘ Orders settle all-or-nothing: this order fills only against a counter-order for exactly{" "}
+              {tokenAmt} at {fmtCkb(draft.totalPrice, 8)} in total. Check every value above before signing —
+              your wallet will ask you to approve the transaction.
+            </>
+          )}
         </p>
 
         {error && (
