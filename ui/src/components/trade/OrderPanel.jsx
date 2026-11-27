@@ -10,7 +10,8 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
   const { connected, connect, token, balance, tokenBalance } = useWallet();
   const { marketPrice } = useMarket();
   const form = useOrderForm({ onReview, onDraftReady });
-  const { side, setSide, values, setField, setPrice, invalid, submit } = form;
+  const { side, setSide, type, setType, quote, values, setField, setPrice, invalid, submit } = form;
+  const isMarket = type === "market";
 
   useEffect(() => {
     if (priceRequest) setPrice(priceRequest.price);
@@ -43,30 +44,57 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
         </div>
       )}
 
-      <div className="type-chip">
-        <button>{connected && "▦ "}Limit</button>
+      <div className="toggle type" role="tablist" aria-label="Order type">
+        {["market", "limit"].map((t) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={type === t}
+            className={type === t ? "on accent" : ""}
+            onClick={() => setType(t)}
+          >
+            {t === "market" ? "Market" : "Limit"}
+          </button>
+        ))}
       </div>
 
       {connected ? (
         <form className="order-form" onSubmit={submit}>
           <div>
-            <Field
-              label="Order Price"
-              hint={
-                marketPrice !== null &&
-                marketPrice !== undefined && (
-                  <button type="button" onClick={() => setPrice(marketPrice)}>
-                    Market {fmtPriceAuto(marketPrice)}
-                  </button>
-                )
-              }
-              suffix={`CKB / ${symbol}`}
-              placeholder="Enter order price"
-              value={values.orderPrice}
-              onChange={setField("orderPrice")}
-              inputMode="decimal"
-              invalid={invalid === "orderPrice"}
-            />
+            {isMarket ? (
+              <Field
+                label="Price"
+                hint={quote && !quote.error && `Slippage ${quote.slippage * 100}%`}
+                suffix={`CKB / ${symbol}`}
+                value={
+                  quote && !quote.error
+                    ? `≈ ${fmtPriceAuto(quote.avgPrice)} (limit ${fmtPriceAuto(Number(quote.limitPrice))})`
+                    : ""
+                }
+                placeholder="Best available market price"
+                readOnly
+                disabled
+              />
+            ) : (
+              <Field
+                label="Order Price"
+                hint={
+                  marketPrice !== null &&
+                  marketPrice !== undefined && (
+                    <button type="button" onClick={() => setPrice(marketPrice)}>
+                      Market {fmtPriceAuto(marketPrice)}
+                    </button>
+                  )
+                }
+                suffix={`CKB / ${symbol}`}
+                placeholder="Enter order price"
+                value={values.orderPrice}
+                onChange={setField("orderPrice")}
+                inputMode="decimal"
+                invalid={invalid === "orderPrice"}
+              />
+            )}
             <Field
               label="Amount"
               suffix={symbol}
@@ -91,9 +119,9 @@ export default function OrderPanel({ onReview, onDraftReady, priceRequest }) {
       ) : (
         <>
           <Field
-            label="Order Price"
+            label={isMarket ? "Price" : "Order Price"}
             suffix="CKB"
-            placeholder="Enter order price"
+            placeholder={isMarket ? "Best available market price" : "Enter order price"}
             disabled
           />
           <Field
