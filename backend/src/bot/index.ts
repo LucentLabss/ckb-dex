@@ -1014,6 +1014,14 @@ export default class DexOrderBot implements DexOrderBotTrait {
     }
 
     if (decoded.orderVersion === 2) {
+      const deployment = getDeployment(this.config?.ckbNetwork ?? "testnet");
+      if (
+        deployment?.market?.marketHash &&
+        decoded.marketConfigHash?.toLowerCase() !== deployment.market.marketHash.toLowerCase()
+      ) {
+        console.warn(`skipping dex order cell ${id}: retired marketConfigHash ${decoded.marketConfigHash}`);
+        return undefined;
+      }
       if (decoded.direction === "ASK") {
         if (!cell.cellOutput.type) {
           console.warn(`skipping dex order cell ${id}: SELL order cell must carry a type script`);
@@ -1255,7 +1263,15 @@ export default class DexOrderBot implements DexOrderBotTrait {
   }
 
   private async refreshPendingPairOrders(): Promise<void> {
-    const live = await Order.find({ status: "LIVE" });
+    const deployment = getDeployment(this.config?.ckbNetwork ?? "testnet");
+    const filter: Record<string, unknown> = {
+      status: "LIVE",
+      "lockScript.codeHash": this.config.dexOrderLockScript.codeHash,
+    };
+    if (deployment?.market?.marketHash) {
+      filter.marketConfigHash = deployment.market.marketHash;
+    }
+    const live = await Order.find(filter);
     this._pendingPairOrders = this.sort(live);
   }
 

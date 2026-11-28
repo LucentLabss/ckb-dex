@@ -3,7 +3,7 @@ import { createExpressServer } from "./app.js";
 import DexOrderBot from "./bot/index.js";
 import AppConfiguration from "./config.js";
 import { Database } from "./services/index.js";
-import { backfillSortKeys } from "./services/backfill.js";
+import { backfillSortKeys, cleanupObsoleteOrders } from "./services/backfill.js";
 import { createChainVerification, registerChainVerification } from "./services/chain-verifier.js";
 import { Config } from "./types/index.js";
 
@@ -19,6 +19,10 @@ export let config: Config | undefined = undefined;
   /**Connect to database before any other server startup action */
   await databaseConnection.connect();
   await backfillSortKeys();
+  const cleanedOrders = await cleanupObsoleteOrders(config);
+  if (cleanedOrders > 0) {
+    console.info(`Cleaned up ${cleanedOrders} obsolete order(s) from previous script/market versions`);
+  }
 
   const app = createExpressServer(config, {
     isReady: () => databaseConnection.isConnected(),
